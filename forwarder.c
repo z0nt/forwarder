@@ -43,20 +43,25 @@
 #define HOST	"127.0.0.1"
 #define PORT	53
 #define BUF_SIZ	1024
-#define TIMEOUT	500 /* milliseconds */
+#define TIMEOUT	500000 /* microseconds */
 
 #define nonblock_socket(s) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK)
 
 struct dns_server_s {
-	char name[1024];
+	char name[15];
 	unsigned short port;
 	unsigned short conf_weight;
 	unsigned short weight;
+	int id;
 	struct sockaddr_in addr;
 	socklen_t len;
 };
 
 struct dns_client_s {
+	int id;
+	int ret;
+	int inuse;
+	struct timeval tv;
 	struct sockaddr_in addr;
 	socklen_t len;
 };
@@ -64,32 +69,37 @@ struct dns_client_s {
 typedef struct dns_server_s dns_server_t;
 typedef struct dns_client_s dns_client_t;
 
-int sock;
-int clisock;
+static int sock;
+static int clisock;
+static int servers;
+static dns_server_t *srv;
+static int clients;
+static dns_client_t *cli;
 
-/* FIXME */
-int dns_servers;
-dns_server_t dns_srv[2];
-dns_client_t dns_cli[65536];
-
-void sockinit(void);
-void dnsinit(void);
-void mainloop(void);
-ssize_t recv_udp(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen_t *fromlen);
-ssize_t send_udp(int s, const void *buf, size_t len, int flags, const struct sockaddr *to, socklen_t tolen);
+static void sock_init(void);
+static void dns_init(void);
+static void cli_init(void);
+static void mainloop(void);
+static ssize_t recv_udp(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen_t *fromlen, int *id);
+static ssize_t send_udp(int s, const void *buf, size_t len, int flags, const struct sockaddr *to, socklen_t tolen);
+static int find_newcli(void);
+static int find_cli(int id);
+static int find_dns(int ret);
+static int find_timeout(struct timeval tp);
 
 int
 main(void)
 {
-	sockinit();
-	dnsinit();
+	sock_init();
+	dns_init();
+	cli_init();
 	mainloop();
 
 	exit(0);
 }
 
-void
-sockinit(void)
+static void
+sock_init(void)
 {
 	int rc;
 	struct sockaddr_in servaddr;
@@ -118,54 +128,61 @@ sockinit(void)
 	nonblock_socket(clisock);
 }
 
-void
-dnsinit(void)
+static void
+dns_init(void)
 {
 	int i;
 
-	dns_servers = 2;
-	strcpy(dns_srv[0].name, "95.108.142.1");
-	strcpy(dns_srv[1].name, "95.108.142.2");
-	dns_srv[0].conf_weight = 10;
-	dns_srv[1].conf_weight = 90;
+	servers = 2;
+	srv = malloc(sizeof(dns_server_t) * servers);
 
-#if 0
-	dns = malloc(sizeof(struct dns_server));
-	if (dns == NULL)
-		err(1, "malloc()");
-#endif
+	strcpy(srv[0].name, "95.108.142.2");
+	strcpy(srv[1].name, "95.108.142.1");
+	srv[0].conf_weight = 10;
+	srv[1].conf_weight = 90;
 
-	for (i = 0; i < dns_servers; i++) {
-		bzero(&dns_srv[i].addr, sizeof(struct sockaddr_in));
-		dns_srv[i].addr.sin_family = PF_INET;
-		dns_srv[i].addr.sin_addr.s_addr = inet_addr(dns_srv[i].name);
-		dns_srv[i].addr.sin_port = htons(dns_srv[i].port ? dns_srv[i].port : PORT);
-		dns_srv[i].len = sizeof(struct sockaddr_in);
+	for (i = 0; i < servers; i++) {
+		bzero(&srv[i].addr, sizeof(struct sockaddr_in));
+		srv[i].addr.sin_family = PF_INET;
+		srv[i].addr.sin_addr.s_addr = inet_addr(srv[i].name);
+		srv[i].addr.sin_port = htons(srv[i].port ? srv[i].port : PORT);
+		srv[i].len = sizeof(struct sockaddr_in);
 	}
 }
 
-void
+static void
+cli_init(void)
+{
+	int i;
+
+	clients = 1024;
+	cli = malloc(sizeof(dns_client_t) * clients);
+
+	for (i = 0; i < clients; i++) {
+		cli[i].inuse = 0;
+		bzero(&cli[i].addr, sizeof(struct sockaddr_in));
+		cli[i].len = sizeof(struct sockaddr_in);
+	}
+}
+
+static void
 mainloop(void)
 {
 	int i;
+	int j;
 	int k;
+	int id;
 	int kq;
 	int nc;
+	int to;
 	ssize_t n;
 	char buf[BUF_SIZ];
 	struct kevent *ch;
 	struct kevent *ev;
+	struct timeval tp;
 	struct timespec *timeout;
 	struct timespec tv;
-	dns_server_t *srv;
-	dns_client_t *cli;
-	dns_client_t cli1;
-
-	/* Init DNS server with highest weight */
-	srv = &dns_srv[1];
-	/* Init client structure */
-	cli1.len = sizeof(struct sockaddr_in);
-	cli = &cli1;
+	dns_server_t srv1;
 
 	ch = calloc(1, sizeof(struct kevent) * 2);
 	if (ch == NULL)
@@ -187,41 +204,60 @@ mainloop(void)
 	/* Main loop */
 	for ( ;; ) {
 
-		k = kevent(kq, ch, nc, ev, 2, timeout);
+		k = kevent(kq, ch, nc, ev, 2 /* number of sockets */, timeout);
 		if (n == -1)
 			err(1, "kevent()");
 
 		nc = 0;
+		gettimeofday(&tp, NULL);
 
 		if (k == 0) {
 			printf("kevent() timeout\n");
+#if 0
 			/* Change DNS server */
-			srv = &dns_srv[0];
-			n = send_udp(clisock, buf, n, 0, (const struct sockaddr *)&srv->addr, srv->len);
+			j = find_who_timeouted();
+			j = find_dns(cli[j].ret++);
+			n = send_udp(clisock, buf, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
+#endif
 		}
 
 		for (i = 0; i < k; i++) {
 			if (ev[i].ident == sock) {
+				j = find_newcli();
+				if (j == -1) {
+					warnx("Max clients reach");
+					continue;
+				}
 				/* Read request from client */
-				n = recv_udp(sock, buf, BUF_SIZ, 0, (struct sockaddr *)&cli->addr, &cli->len);
-				/* Copy ...
-				memcpy(dns_cli[id], cli, sizeof(dns_client_t));
-				*/
+				n = recv_udp(sock, buf, BUF_SIZ, 0, (struct sockaddr *)&cli[j].addr,
+				    &cli[j].len, &cli[j].id);
+				cli[j].tv = tp;
 
+				j = find_dns(cli[j].ret++);
 				/* Send request to DNS server */
-				n = send_udp(clisock, buf, n, 0, (const struct sockaddr *)&srv->addr, srv->len);
+				n = send_udp(clisock, buf, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
 
-				tv.tv_sec = 0;
-				tv.tv_nsec = TIMEOUT * 1000000;
-				timeout = &tv;
-			}
-
-			if (ev[i].ident == clisock) {
+				to = find_timeout(tp);
+				if (to == -1) {
+					timeout = NULL;
+				} else {
+					tv.tv_sec = 0;
+					tv.tv_nsec = to * 1000;
+					timeout = &tv;
+				}
+			} else {
 				/* Read answer from DNS server */
-				n = recv_udp(clisock, buf, BUF_SIZ, 0, (struct sockaddr *)&srv->addr, &srv->len);
+				n = recv_udp(clisock, buf, BUF_SIZ, 0, (struct sockaddr *)&srv1.addr,
+				    &srv1.len, &id);
+				j = find_cli(id);
+				if (j == -1) {
+					warnx("Cannot find client");
+					continue;
+				}
 
 				/* Send answer to client */
-				n = send_udp(sock, buf, n, 0, (const struct sockaddr *)&cli->addr, cli->len);
+				n = send_udp(sock, buf, n, 0, (const struct sockaddr *)&cli[j].addr, cli[j].len);
+				cli[j].inuse = 0;
 				/* If second DNS answer faster than first, decrease weight of first DNS */
 				timeout = NULL;
 			}
@@ -229,8 +265,8 @@ mainloop(void)
 	}
 }
 
-ssize_t
-recv_udp(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen_t *fromlen)
+static ssize_t
+recv_udp(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen_t *fromlen, int *id)
 {
 	ssize_t n;
 	short int dns_id;
@@ -241,11 +277,12 @@ recv_udp(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen
 
 	memcpy(&dns_id, buf, sizeof(short int));
 	printf("read %d bytes from client (id: %d)\n", n, ntohs(dns_id));
+	*id = htons(dns_id);
 
 	return(n);
 }
 
-ssize_t
+static ssize_t
 send_udp(int s, const void *buf, size_t len, int flags, const struct sockaddr *to, socklen_t tolen)
 {
 	ssize_t n;
@@ -259,4 +296,70 @@ send_udp(int s, const void *buf, size_t len, int flags, const struct sockaddr *t
 	printf("write %d bytes to client (id: %d)\n", n, ntohs(dns_id));
 
 	return(n);
+}
+
+static int
+find_newcli(void)
+{
+	int i;
+
+	for (i = 0; i < clients; i++) {
+		if (cli[i].inuse == 0) {
+			cli[i].inuse = 1;
+			cli[i].ret = 0;
+			return(i);
+		}
+	}
+
+	return(-1);
+}
+
+static int
+find_cli(int id)
+{
+	int i;
+
+	for (i = 0; i < clients; i++) {
+		if (cli[i].id == id)
+			return(i);
+	}
+
+	return(-1);
+}
+
+static int
+find_dns(int ret)
+{
+	if (ret % servers == 0)
+		return(0);
+	else
+		return(1);
+}
+
+static int
+find_timeout(struct timeval tp)
+{
+	int i;
+	int to;
+	struct timeval diff;
+	struct timeval diff1;
+
+	diff.tv_sec = 0;
+	diff.tv_usec = 0;
+
+	for (i = 0; i < clients; i++) {
+		if (cli[i].inuse == 1) {
+			diff1.tv_sec = tp.tv_sec - cli[i].tv.tv_sec;
+			diff1.tv_usec = tp.tv_usec - cli[i].tv.tv_usec;
+			if (diff1.tv_sec <= cli[i].tv.tv_sec && diff1.tv_sec < cli[i].tv.tv_sec)
+				diff = diff1;
+		}
+	}
+
+	if (diff.tv_usec > 0)
+		to = diff.tv_usec;
+	else
+		to = TIMEOUT;
+
+	return(to);
 }
