@@ -40,7 +40,7 @@
 #include <unistd.h>
 
 /*#define HOST	INADDR_ANY*/
-#define HOST	"127.0.0.1"
+#define HOST	"127.0.0.2"
 #define PORT	53
 #define BUF_SIZ	1024
 #define TIMEOUT	500000 /* microseconds */
@@ -86,6 +86,7 @@ static int find_newcli(void);
 static int find_cli(int id);
 static int find_dns(int ret);
 static int find_timeout(struct timeval tp);
+static int find_timeouted(struct timeval tp);
 
 int
 main(void)
@@ -179,7 +180,6 @@ mainloop(void)
 	char buf[BUF_SIZ];
 	struct kevent *ch;
 	struct kevent *ev;
-	struct timeval tp;
 	struct timespec *timeout;
 	struct timespec tv;
 	dns_server_t srv1;
@@ -210,15 +210,27 @@ mainloop(void)
 
 		nc = 0;
 		gettimeofday(&tp, NULL);
+		printf("%d.%06ld: ", tp.tv_sec, tp.tv_usec);
 
 		if (k == 0) {
 			printf("kevent() timeout\n");
-#if 0
 			/* Change DNS server */
-			j = find_who_timeouted();
+			j = find_timeouted(tp);
+			if (j == -1)
+				continue;
+
 			j = find_dns(cli[j].ret++);
 			n = send_udp(clisock, buf, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
-#endif
+
+			cli[j].tv = tp;
+			to = find_timeout(tp);
+			if (to == -1) {
+				timeout = NULL;
+			} else {
+				tv.tv_sec = 0;
+				tv.tv_nsec = to * 1000;
+				timeout = &tv;
+			}
 		}
 
 		for (i = 0; i < k; i++) {
@@ -231,12 +243,12 @@ mainloop(void)
 				/* Read request from client */
 				n = recv_udp(sock, buf, BUF_SIZ, 0, (struct sockaddr *)&cli[j].addr,
 				    &cli[j].len, &cli[j].id);
-				cli[j].tv = tp;
 
 				j = find_dns(cli[j].ret++);
 				/* Send request to DNS server */
 				n = send_udp(clisock, buf, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
 
+				cli[j].tv = tp;
 				to = find_timeout(tp);
 				if (to == -1) {
 					timeout = NULL;
@@ -277,7 +289,7 @@ recv_udp(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen
 
 	memcpy(&dns_id, buf, sizeof(short int));
 	printf("read %d bytes from client (id: %d)\n", n, ntohs(dns_id));
-	*id = htons(dns_id);
+	*id = ntohs(dns_id);
 
 	return(n);
 }
@@ -349,17 +361,55 @@ find_timeout(struct timeval tp)
 
 	for (i = 0; i < clients; i++) {
 		if (cli[i].inuse == 1) {
+
+			printf("client #%d time: %d.%06ld\n", i, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
+
 			diff1.tv_sec = tp.tv_sec - cli[i].tv.tv_sec;
-			diff1.tv_usec = tp.tv_usec - cli[i].tv.tv_usec;
-			if (diff1.tv_sec <= cli[i].tv.tv_sec && diff1.tv_sec < cli[i].tv.tv_sec)
+			if (tp.tv_usec < cli[i].tv.tv_usec) {
+				diff1.tv_usec = 1000000 + tp.tv_usec - cli[i].tv.tv_usec;
+				diff1.tv_sec = diff1.tv_sec - 1;
+			} else {
+				diff1.tv_usec = tp.tv_usec - cli[i].tv.tv_usec;
+			}
+
+			printf("client #%d diff: %d.%06ld\n", i, diff1.tv_sec, diff1.tv_usec);
+
+			if (diff1.tv_usec > 0 && diff1.tv_sec >= diff.tv_sec && diff1.tv_usec > diff.tv_usec) {
 				diff = diff1;
+			}
 		}
 	}
 
-	if (diff.tv_usec > 0)
-		to = diff.tv_usec;
+	printf("diff: %d.%06ld\n", diff.tv_sec, diff.tv_usec);
+
+	if (TIMEOUT - diff.tv_usec > 0)
+		to = TIMEOUT - diff.tv_usec;
 	else
 		to = TIMEOUT;
 
+	printf("timeout set: 0.%d\n", to);
+
 	return(to);
+}
+
+static int
+find_timeouted(struct timeval tp)
+{
+	int i;
+
+	for (i = 0; i < clients; i++) {
+		if (cli[i].inuse == 1) {
+			if (tp.tv_sec > cli[i].tv.tv_sec) {
+				if (tp.tv_usec < cli[i].tv.tv_usec) {
+					if (1000000 + tp.tv_usec - cli[i].tv.tv_usec + TIMEOUT) {
+						return(i);
+					}
+				}
+			} else if (tp.tv_sec == cli[i].tv.tv_sec && tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
+				return(i);
+			}
+		}
+	}
+
+	return(-1);
 }
