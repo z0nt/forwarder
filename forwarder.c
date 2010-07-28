@@ -42,13 +42,14 @@
 /*#define HOST	INADDR_ANY*/
 #define HOST	"127.0.0.2"
 #define PORT	53
+#define IP_LEN	15
 #define BUF_SIZ	1024
 #define TIMEOUT	500000 /* microseconds */
 
 #define nonblock_socket(s) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK)
 
 struct dns_server_s {
-	char name[15];
+	char name[IP_LEN];
 	unsigned short port;
 	unsigned short conf_weight;
 	unsigned short weight;
@@ -61,6 +62,7 @@ struct dns_client_s {
 	int id;
 	int ret;
 	int inuse;
+	char buf[BUF_SIZ];
 	struct timeval tv;
 	struct sockaddr_in addr;
 	socklen_t len;
@@ -73,6 +75,7 @@ static int sock;
 static int clisock;
 static int servers;
 static dns_server_t *srv;
+static int active_clients;
 static int clients;
 static dns_client_t *cli;
 
@@ -177,11 +180,13 @@ mainloop(void)
 	int nc;
 	int to;
 	ssize_t n;
+	void *ptr;
 	char buf[BUF_SIZ];
 	struct kevent *ch;
 	struct kevent *ev;
 	struct timespec *timeout;
 	struct timespec tv;
+	struct timeval tp;
 	dns_server_t srv1;
 
 	ch = calloc(1, sizeof(struct kevent) * 2);
@@ -196,13 +201,22 @@ mainloop(void)
 	if (kq == -1)
 		err(1, "kqueue()");
 
+	active_clients = 0;
+
 	nc = 0;
-	timeout = NULL;
 	EV_SET(&ch[nc++], sock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 	EV_SET(&ch[nc++], clisock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 
 	/* Main loop */
 	for ( ;; ) {
+		if (active_clients == 0) {
+			timeout = NULL;
+		} else {
+			to = find_timeout(tp);
+			tv.tv_sec = 0;
+			tv.tv_nsec = to * 1000;
+			timeout = &tv;
+		}
 
 		k = kevent(kq, ch, nc, ev, 2 /* number of sockets */, timeout);
 		if (n == -1)
@@ -214,23 +228,17 @@ mainloop(void)
 
 		if (k == 0) {
 			printf("kevent() timeout\n");
-			/* Change DNS server */
+			/* XXX may timeouted many clients */
 			j = find_timeouted(tp);
 			if (j == -1)
 				continue;
 
-			j = find_dns(cli[j].ret++);
-			n = send_udp(clisock, buf, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
+			printf("timeouted client: idx = %d (id: %d)\n", j, cli[j].id);
 
 			cli[j].tv = tp;
-			to = find_timeout(tp);
-			if (to == -1) {
-				timeout = NULL;
-			} else {
-				tv.tv_sec = 0;
-				tv.tv_nsec = to * 1000;
-				timeout = &tv;
-			}
+			ptr = cli[j].buf;
+			j = find_dns(cli[j].ret++);
+			n = send_udp(clisock, ptr, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
 		}
 
 		for (i = 0; i < k; i++) {
@@ -240,23 +248,16 @@ mainloop(void)
 					warnx("Max clients reach");
 					continue;
 				}
+				++active_clients;
+				cli[j].tv = tp;
 				/* Read request from client */
-				n = recv_udp(sock, buf, BUF_SIZ, 0, (struct sockaddr *)&cli[j].addr,
+				n = recv_udp(sock, cli[j].buf, BUF_SIZ, 0, (struct sockaddr *)&cli[j].addr,
 				    &cli[j].len, &cli[j].id);
+				ptr = cli[j].buf;
 
 				j = find_dns(cli[j].ret++);
 				/* Send request to DNS server */
-				n = send_udp(clisock, buf, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
-
-				cli[j].tv = tp;
-				to = find_timeout(tp);
-				if (to == -1) {
-					timeout = NULL;
-				} else {
-					tv.tv_sec = 0;
-					tv.tv_nsec = to * 1000;
-					timeout = &tv;
-				}
+				n = send_udp(clisock, ptr, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
 			} else {
 				/* Read answer from DNS server */
 				n = recv_udp(clisock, buf, BUF_SIZ, 0, (struct sockaddr *)&srv1.addr,
@@ -270,8 +271,7 @@ mainloop(void)
 				/* Send answer to client */
 				n = send_udp(sock, buf, n, 0, (const struct sockaddr *)&cli[j].addr, cli[j].len);
 				cli[j].inuse = 0;
-				/* If second DNS answer faster than first, decrease weight of first DNS */
-				timeout = NULL;
+				--active_clients;
 			}
 		}
 	}
@@ -330,10 +330,20 @@ static int
 find_cli(int id)
 {
 	int i;
+	int active;
+
+	active = active_clients;
 
 	for (i = 0; i < clients; i++) {
-		if (cli[i].id == id)
-			return(i);
+		if (cli[i].inuse == 1) {
+			if (cli[i].id == id) {
+				return(i);
+			}
+
+			while (--active > 0) {
+				break;
+			}
+		}
 	}
 
 	return(-1);
@@ -342,10 +352,11 @@ find_cli(int id)
 static int
 find_dns(int ret)
 {
-	if (ret % servers == 0)
+	if (ret % servers == 0) {
 		return(0);
-	else
+	} else {
 		return(1);
+	}
 }
 
 static int
@@ -353,8 +364,11 @@ find_timeout(struct timeval tp)
 {
 	int i;
 	int to;
+	int active;
 	struct timeval diff;
 	struct timeval diff1;
+
+	active = active_clients;
 
 	diff.tv_sec = 0;
 	diff.tv_usec = 0;
@@ -362,7 +376,7 @@ find_timeout(struct timeval tp)
 	for (i = 0; i < clients; i++) {
 		if (cli[i].inuse == 1) {
 
-			printf("client #%d time: %d.%06ld\n", i, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
+			printf("client #%d (id: %d) time: %d.%06ld\n", i, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
 
 			diff1.tv_sec = tp.tv_sec - cli[i].tv.tv_sec;
 			if (tp.tv_usec < cli[i].tv.tv_usec) {
@@ -377,17 +391,22 @@ find_timeout(struct timeval tp)
 			if (diff1.tv_usec > 0 && diff1.tv_sec >= diff.tv_sec && diff1.tv_usec > diff.tv_usec) {
 				diff = diff1;
 			}
+
+			while (--active > 0) {
+				break;
+			}
 		}
 	}
 
-	printf("diff: %d.%06ld\n", diff.tv_sec, diff.tv_usec);
+	printf("max diff: %d.%06ld\n", diff.tv_sec, diff.tv_usec);
 
-	if (TIMEOUT - diff.tv_usec > 0)
+	if (TIMEOUT - diff.tv_usec > 0) {
 		to = TIMEOUT - diff.tv_usec;
-	else
+	} else {
 		to = TIMEOUT;
+	}
 
-	printf("timeout set: 0.%d\n", to);
+	printf("timeout set: 0.%06d\n", to);
 
 	return(to);
 }
@@ -396,17 +415,27 @@ static int
 find_timeouted(struct timeval tp)
 {
 	int i;
+	int active;
+
+	active = active_clients;
 
 	for (i = 0; i < clients; i++) {
 		if (cli[i].inuse == 1) {
+
+			printf("client #%d (id: %d) timeouted: %d.%06ld\n", i, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
+
 			if (tp.tv_sec > cli[i].tv.tv_sec) {
 				if (tp.tv_usec < cli[i].tv.tv_usec) {
-					if (1000000 + tp.tv_usec - cli[i].tv.tv_usec + TIMEOUT) {
+					if (1000000 + tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
 						return(i);
 					}
 				}
 			} else if (tp.tv_sec == cli[i].tv.tv_sec && tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
 				return(i);
+			}
+
+			while (--active > 0) {
+				break;
 			}
 		}
 	}
