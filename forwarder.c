@@ -32,11 +32,15 @@
 #include <arpa/inet.h>
 
 #include <err.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <syslog.h>
 #include <unistd.h>
 
 /*#define HOST	INADDR_ANY*/
@@ -78,6 +82,9 @@ static dns_server_t *srv;
 static int active_clients;
 static int clients;
 static dns_client_t *cli;
+static int debug_level = 3;
+static int syslog_flag = 0;
+static int logfd = 1;
 
 static void sock_init(void);
 static void dns_init(void);
@@ -90,6 +97,8 @@ static int find_cli(int id);
 static int find_dns(int ret);
 static int find_timeout(struct timeval tp);
 static int find_timeouted(struct timeval tp);
+static void logout(const int level, const char *fmt, ...);
+static void logerr(const int level, const char *fmt, ...);
 
 int
 main(void)
@@ -179,6 +188,7 @@ mainloop(void)
 	int kq;
 	int nc;
 	int to;
+	int active;
 	ssize_t n;
 	void *ptr;
 	char buf[BUF_SIZ];
@@ -224,21 +234,31 @@ mainloop(void)
 
 		nc = 0;
 		gettimeofday(&tp, NULL);
-		printf("%d.%06ld: ", tp.tv_sec, tp.tv_usec);
+		logout(3, "time: %d.%06ld", tp.tv_sec, tp.tv_usec);
 
 		if (k == 0) {
-			printf("kevent() timeout\n");
-			/* XXX may timeouted many clients */
-			j = find_timeouted(tp);
-			if (j == -1)
-				continue;
+			logout(3, "kevent() timeout");
+		}
 
-			printf("timeouted client: idx = %d (id: %d)\n", j, cli[j].id);
+		/* Find timeouted requests */
+		active = active_clients;
+		for (i = 0; i < clients; i++) {
+			if (cli[i].inuse == 1) {
+				j = find_timeouted(tp);
+				if (j == -1)
+					break;
 
-			cli[j].tv = tp;
-			ptr = cli[j].buf;
-			j = find_dns(cli[j].ret++);
-			n = send_udp(clisock, ptr, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
+				logout(3, "timeouted client: idx = %03d (id: %05d)", j, cli[j].id);
+
+				cli[j].tv = tp;
+				ptr = cli[j].buf;
+				j = find_dns(cli[j].ret++);
+				n = send_udp(clisock, ptr, n, 0, (const struct sockaddr *)&srv[j].addr, srv[j].len);
+
+				while (--active > 0) {
+					break;
+				}
+			}
 		}
 
 		for (i = 0; i < k; i++) {
@@ -288,7 +308,7 @@ recv_udp(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen
 		err(1, "recvfrom()");
 
 	memcpy(&dns_id, buf, sizeof(short int));
-	printf("read %d bytes from client (id: %d)\n", n, ntohs(dns_id));
+	logout(3, "read %d bytes from client (id: %05d)", n, ntohs(dns_id));
 	*id = ntohs(dns_id);
 
 	return(n);
@@ -305,7 +325,7 @@ send_udp(int s, const void *buf, size_t len, int flags, const struct sockaddr *t
 		err(1, "sendto()");
 
 	memcpy(&dns_id, buf, sizeof(short int));
-	printf("write %d bytes to client (id: %d)\n", n, ntohs(dns_id));
+	logout(3, "write %d bytes to client (id: %05d)", n, ntohs(dns_id));
 
 	return(n);
 }
@@ -376,7 +396,7 @@ find_timeout(struct timeval tp)
 	for (i = 0; i < clients; i++) {
 		if (cli[i].inuse == 1) {
 
-			printf("client #%d (id: %d) time: %d.%06ld\n", i, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
+			logout(3, "client #%03d (id: %05d) time: %d.%06ld", i, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
 
 			diff1.tv_sec = tp.tv_sec - cli[i].tv.tv_sec;
 			if (tp.tv_usec < cli[i].tv.tv_usec) {
@@ -386,7 +406,7 @@ find_timeout(struct timeval tp)
 				diff1.tv_usec = tp.tv_usec - cli[i].tv.tv_usec;
 			}
 
-			printf("client #%d diff: %d.%06ld\n", i, diff1.tv_sec, diff1.tv_usec);
+			logout(3, "client #%03d (id: %05d) diff: %d.%06ld", i, cli[i].id, diff1.tv_sec, diff1.tv_usec);
 
 			if (diff1.tv_usec > 0 && diff1.tv_sec >= diff.tv_sec && diff1.tv_usec > diff.tv_usec) {
 				diff = diff1;
@@ -398,7 +418,7 @@ find_timeout(struct timeval tp)
 		}
 	}
 
-	printf("max diff: %d.%06ld\n", diff.tv_sec, diff.tv_usec);
+	logout(3, "max diff: %d.%06ld", diff.tv_sec, diff.tv_usec);
 
 	if (TIMEOUT - diff.tv_usec > 0) {
 		to = TIMEOUT - diff.tv_usec;
@@ -406,7 +426,7 @@ find_timeout(struct timeval tp)
 		to = TIMEOUT;
 	}
 
-	printf("timeout set: 0.%06d\n", to);
+	logout(3, "timeout set: 0.%06d", to);
 
 	return(to);
 }
@@ -422,7 +442,7 @@ find_timeouted(struct timeval tp)
 	for (i = 0; i < clients; i++) {
 		if (cli[i].inuse == 1) {
 
-			printf("client #%d (id: %d) timeouted: %d.%06ld\n", i, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
+			logout(3, "client #%03d (id: %05d) timeouted: %d.%06ld", i, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
 
 			if (tp.tv_sec > cli[i].tv.tv_sec) {
 				if (tp.tv_usec < cli[i].tv.tv_usec) {
@@ -441,4 +461,179 @@ find_timeouted(struct timeval tp)
 	}
 
 	return(-1);
+}
+
+static void
+logout(const int level, const char *fmt, ...)
+{
+	int n, m;
+	long int usec;
+	char *nlevel;
+	char buf[PIPE_BUF], *bufp;
+	va_list ap;
+	time_t tv_time_t;
+	struct timeval tv;
+	struct tm *lt;
+
+	n = m = 0;
+	bufp = buf;
+
+	if (level > debug_level)
+		return;
+
+	if (syslog_flag) {
+		va_start(ap, fmt);
+		n = vsnprintf(bufp, PIPE_BUF, fmt, ap);
+		va_end(ap);
+
+		switch(level) {
+		case 1:
+			syslog(LOG_ERR, buf);
+			break;
+		case 2:
+			syslog(LOG_WARNING, buf);
+			break;
+		case 3:
+			syslog(LOG_DEBUG, buf);
+			break;
+		default:
+			break;
+		}
+
+		return;
+	}
+
+	gettimeofday(&tv, (struct timezone *)NULL);
+	tv_time_t = tv.tv_sec;
+	lt = localtime(&tv_time_t);
+	lt->tm_mon++;
+	lt->tm_year += 1900;
+	usec = tv.tv_usec;
+
+	switch(level) {
+		case 1:
+			nlevel = "error";
+			break;
+		case 2:
+			nlevel = "warn";
+			break;
+		case 3:
+			nlevel = "debug";
+			break;
+		default:
+			break;
+	}
+
+	n = snprintf(bufp, PIPE_BUF, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ", lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
+	bufp += n;
+	m +=n;
+
+	va_start(ap, fmt);
+	if (fmt != NULL) {
+		n = vsnprintf(bufp, (PIPE_BUF - m), fmt, ap);
+		bufp += n;
+		m += n;
+	}
+	va_end(ap);
+
+	if (m >= PIPE_BUF) {
+		bufp += - m + PIPE_BUF - 2;
+		m = PIPE_BUF - 2;
+	}
+
+	n = snprintf(bufp, (PIPE_BUF - m), "\n");
+	m += n;
+
+	write(logfd, buf, m);
+}
+
+static void
+logerr(const int level, const char *fmt, ...)
+{
+	int n, m;
+	long int usec;
+	char *nlevel;
+	char buf[PIPE_BUF], *bufp, errbuf[PIPE_BUF], *errbufp;
+	va_list ap;
+	time_t tv_time_t;
+	struct timeval tv;
+	struct tm *lt;
+
+	n = m = 0;
+	bufp = buf;
+	errbufp = errbuf;
+
+	if (level > debug_level)
+		return;
+
+	if (syslog_flag) {
+		va_start(ap, fmt);
+		n = vsnprintf(bufp, PIPE_BUF, fmt, ap);
+		snprintf(bufp + n, (PIPE_BUF - n), " (%d: %%m)", errno);
+		va_end(ap);
+
+		switch(level) {
+		case 1:
+			syslog(LOG_ERR, buf);
+			break;
+		case 2:
+			syslog(LOG_WARNING, buf);
+			break;
+		case 3:
+			syslog(LOG_DEBUG, buf);
+			break;
+		default:
+			break;
+		}
+
+		return;
+	}
+
+	gettimeofday(&tv, (struct timezone *)NULL);
+	tv_time_t = tv.tv_sec;
+	lt = localtime(&tv_time_t);
+	lt->tm_mon++;
+	lt->tm_year += 1900;
+	usec = tv.tv_usec;
+
+	switch(level) {
+		case 1:
+			nlevel = "error";
+			break;
+		case 2:
+			nlevel = "warn";
+			break;
+		case 3:
+			nlevel = "debug";
+			break;
+		default:
+			break;
+	}
+
+	n = snprintf(bufp, PIPE_BUF, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ", lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
+	bufp += n;
+	m +=n;
+
+	va_start(ap, fmt);
+	if (fmt != NULL) {
+		n = vsnprintf(bufp, (PIPE_BUF - m), fmt, ap);
+		bufp += n;
+		m += n;
+	}
+	va_end(ap);
+
+	strerror_r(errno, errbufp, PIPE_BUF - m);
+	n = snprintf(bufp, (PIPE_BUF - m), " (%d: %s)", errno, errbuf);
+	bufp += n;
+	m += n;
+
+	if (m >= PIPE_BUF) {
+		bufp += - m + PIPE_BUF - 2;
+		m = PIPE_BUF - 2;
+	}
+
+	n = snprintf(bufp, (PIPE_BUF - m), "\n");
+	m += n;
+
+	write(logfd, buf, m);
 }
