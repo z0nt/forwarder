@@ -1,7 +1,7 @@
 #
 
 PROG=	forwarder
-SRCS=	forwarder.c
+SRCS=	config.c forwarder.c log.c
 NO_MAN=	1
 
 DEBUG_FLAGS=	-g
