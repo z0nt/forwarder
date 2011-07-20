@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Andrey Zonov <andrey.zonov@gmail.com>
+ * Copyright (c) 2010 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,23 +37,24 @@
 #define nonblock_socket(s) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK)
 
 struct server_s {
-	char name[IP_LEN];
 	unsigned short port;
 	unsigned short conf_weight;
 	unsigned short weight;
 	int id;
 	struct sockaddr_in addr;
 	socklen_t len;
+	char name[IP_LEN];
 };
 
 struct client_s {
 	int id;
+	int num;
 	int ret;
 	int inuse;
-	char buf[BUF_SIZ];
 	struct timeval tv;
 	struct sockaddr_in addr;
 	socklen_t len;
+	char buf[BUF_SIZ];
 };
 
 typedef struct server_s server_t;

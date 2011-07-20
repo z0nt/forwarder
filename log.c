@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Andrey Zonov <andrey.zonov@gmail.com>
+ * Copyright (c) 2010 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,9 +41,9 @@
 #include "log.h"
 
 void
-loginit(char *logfile)
+loginit(const char *logfile)
 {
-        if (debug_level == 0)
+        if (debug_level == MIN_DEBUG_LEVEL)
                 return;
 
         if (syslog_flag)
@@ -116,7 +116,8 @@ logout(const int level, const char *fmt, ...)
 			break;
 	}
 
-	n = snprintf(bufp, PIPE_BUF, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ", lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
+	n = snprintf(bufp, PIPE_BUF, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ",
+	    lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
 	bufp += n;
 	m +=n;
 
@@ -202,7 +203,8 @@ logerr(const int level, const char *fmt, ...)
 			break;
 	}
 
-	n = snprintf(bufp, PIPE_BUF, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ", lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
+	n = snprintf(bufp, PIPE_BUF, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ",
+	    lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
 	bufp += n;
 	m +=n;
 

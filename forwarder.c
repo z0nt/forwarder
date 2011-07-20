@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Andrey Zonov <andrey.zonov@gmail.com>
+ * Copyright (c) 2010 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -47,6 +47,7 @@
 #include "forwarder.h"
 #include "log.h"
 
+static char *stat_file;
 static int sock;
 static int clisock;
 static int active_clients;
@@ -54,10 +55,11 @@ static int clients;
 static client_t *cli;
 static unsigned long requests_cli;
 static unsigned long requests_srv;
-static unsigned int weight_factor;
+static unsigned int weight;
 static int *srv_ptr;
 static int stat_flag = 0;
 
+static void usage(void);
 static void srv_init(void);
 static void cli_init(void);
 static void sock_init(void);
@@ -74,15 +76,66 @@ static int find_timeouted(struct timeval tp);
 static void make_stat(void);
 
 int
-main(void)
+main(int argc, char **argv)
 {
-	config_init("forwarder.conf");
+	int ch;
+	char *endptr;
+	char *config;
+	char *logfile;
+	int daemonize_flag;
+
+	debug_level = 3;
+	syslog_flag = 0;
+	logfile = "forwarder.log";
+	daemonize_flag = 1;
+	config = "forwarder.conf";
+	stat_file = NULL;
+
+	while ((ch = getopt(argc, argv, "c:d:l:ns:")) != -1) {
+		switch (ch) {
+		case 'c':
+			config = optarg;
+			break;
+		case 'd':
+			debug_level = strtol(optarg, &endptr, 10);
+			if (*optarg == '\0' || *endptr != '\0') {
+				fprintf(stderr, "Invalid debug level: %s\n", optarg);
+				usage();
+			}
+			if (debug_level < MIN_DEBUG_LEVEL || debug_level > MAX_DEBUG_LEVEL) {
+				fprintf(stderr, "Debug level must be %d..%d\n", MIN_DEBUG_LEVEL, MAX_DEBUG_LEVEL);
+				usage();
+			}
+
+			break;
+		case 'l':
+			logfile = optarg;
+			if (!strcmp(logfile, "syslog"))
+				syslog_flag = 1;
+			else
+				syslog_flag = 0;
+
+			break;
+		case 'n':
+			daemonize_flag = 0;
+			break;
+		case 's':
+			stat_file = optarg;
+			break;
+		default:
+			usage();
+			break;
+		}
+	}
+
+	config_init(config);
 	srv_init();
 	cli_init();
 	sock_init();
-	debug_level = 3;
-	syslog_flag = 0;
-	loginit("forwarder.log");
+	loginit(logfile);
+	if (daemonize_flag)
+		if (daemon(0, 0) == -1)
+			err(1, "Cannot daemonize");
 	sig_init();
 	mainloop();
 
@@ -90,38 +143,55 @@ main(void)
 }
 
 static void
+usage(void)
+{
+	fprintf(stderr, "usage: %s [-c config file] [-d debug level] [-l logfile] [-n] [-s stat file]\n",
+	    getprogname());
+	exit(1);
+}
+
+static void
 srv_init(void)
 {
 	int i;
 	int j;
-	int n;
-	int w;
+	int *srv_tmp;
 
-	weight_factor = 0;
-
+	/* Init sockaddr structures */
 	for (i = 0; i < servers; i++) {
-		weight_factor += srv[i].conf_weight;
 		bzero(&srv[i].addr, sizeof(struct sockaddr_in));
 		srv[i].len = sizeof(struct sockaddr_in);
 		srv[i].addr.sin_family = PF_INET;
 		srv[i].addr.sin_port = htons(srv[i].port);
 		srv[i].addr.sin_addr.s_addr = inet_addr(srv[i].name);
-		if (srv[i].addr.sin_addr.s_addr == -1)
+		if (srv[i].addr.sin_addr.s_addr == INADDR_NONE)
 			err(1, "inet_addr()");
 	}
 
-	srv_ptr = malloc(sizeof(int) * weight_factor);
+	weight = 0;
+	for (i = 0; i < servers; i++)
+		weight += srv[i].conf_weight;
+
+	srv_ptr = malloc(sizeof(int) * weight);
 	if (srv_ptr == NULL)
 		err(1, "malloc()");
 
-	w = 0;
-	for (i = 0; i < servers; i++) {
+	srv_tmp = malloc(sizeof(int) * weight);
+	if (srv_tmp == NULL)
+		err(1, "malloc()");
+
+	for (i = 0; i < servers; i++)
+		srv_tmp[i] = 1;
+
+	for (i = 0; i < weight; i++) {
 		n = srv[i].conf_weight;
 		for (j = n + w; j > w; j--) {
 			srv_ptr[j - 1] = i;
 		}
 		w += n;
 	}
+
+	free(srv_tmp);
 }
 
 static void
@@ -180,6 +250,7 @@ sig_init(void)
 	sigset_t sigmask;
 
 	sigemptyset(&sigmask);
+	sigaddset(&sigmask, SIGHUP);
 	sigaddset(&sigmask, SIGPIPE);
 	sigprocmask(SIG_BLOCK, &sigmask, NULL);
 
@@ -195,8 +266,11 @@ static void
 sig_handler(int signum)
 {
 	if (signum == SIGUSR1) {
-		stat_flag = 1;
+		if (stat_file) {
+			stat_flag = 1;
+		}
 	} else {
+		/* XXX */
 		exit(0);
 	}
 }
@@ -222,6 +296,7 @@ mainloop(void)
 	struct timeval tp;
 	server_t srv1;
 
+	/* Initialization */
 	srv1.len = sizeof(struct sockaddr_in);
 
 	ch = calloc(1, sizeof(struct kevent) * 2);
@@ -277,14 +352,14 @@ mainloop(void)
 		logout(3, "time: %d.%06ld", tp.tv_sec, tp.tv_usec);
 
 		if (k == 0) {
-			logout(3, "kevent() timeout");
+			logout(3, "kevent() timeouted");
 		}
 
 		for (i = 0; i < k; i++) {
 			if (ev[i].ident == sock) {
 				j = find_newcli();
 				if (j == -1) {
-					logout(1, "Max clients reach");
+					logout(1, "Max clients reached");
 					continue;
 				}
 				/* Read request from client */
@@ -324,7 +399,7 @@ mainloop(void)
 				if (j == -1)
 					break;
 
-				logout(3, "timeouted client: idx = %03d (id: %05d)", j, cli[j].id);
+				logout(3, "client #%03d (id: %05d) timeouted", cli[j].num, cli[j].id);
 
 				cli[j].tv = tp;
 				ptr = cli[j].buf;
@@ -358,7 +433,8 @@ recv_udp(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen
 	}
 
 	memcpy(&dns_id, buf, sizeof(short int));
-	logout(3, "read %d bytes from %s (id: %05d)", n, inet_ntoa(((struct sockaddr_in *)from)->sin_addr), ntohs(dns_id));
+	logout(3, "read %d bytes from %s (id: %05d)",
+	    n, inet_ntoa(((struct sockaddr_in *)from)->sin_addr), ntohs(dns_id));
 	*id = ntohs(dns_id);
 
 	return(n);
@@ -380,7 +456,8 @@ send_udp(int s, const void *buf, size_t len, int flags, const struct sockaddr *t
 	}
 
 	memcpy(&dns_id, buf, sizeof(short int));
-	logout(3, "write %d bytes to %s (id: %05d)", n, inet_ntoa(((struct sockaddr_in *)to)->sin_addr), ntohs(dns_id));
+	logout(3, "write %d bytes to %s (id: %05d)",
+	    n, inet_ntoa(((struct sockaddr_in *)to)->sin_addr), ntohs(dns_id));
 
 	return(n);
 }
@@ -396,6 +473,7 @@ find_newcli(void)
 		if (cli[i].inuse == 0) {
 			cli[i].inuse = 1;
 			cli[i].ret = 0;
+			cli[i].num = requests_cli;
 			return(i);
 		}
 	}
@@ -424,8 +502,9 @@ find_srv(int ret)
 {
 	int i;
 
-	i = srv_ptr[(requests_srv - 1) % weight_factor];
-	logout(3, "server #%02d finded (r: %d, factor: %d, weight: %d)", i, requests_srv, weight_factor, srv[i].conf_weight);
+	i = srv_ptr[(requests_srv - 1) % weight];
+	logout(3, "server #%02d found (request: %d, weight: %d/%d)",
+	    i, requests_srv, srv[i].conf_weight, weight);
 
 	return(i);
 }
@@ -447,17 +526,19 @@ find_timeout(struct timeval tp)
 	for (i = 0; i < clients; i++) {
 		if (cli[i].inuse == 1) {
 
-			logout(3, "client #%03d (id: %05d) time: %d.%06ld", i, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
+			logout(3, "client #%03d (id: %05d) time: %d.%06ld",
+			    cli[i].num, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
 
 			diff1.tv_sec = tp.tv_sec - cli[i].tv.tv_sec;
 			if (tp.tv_usec < cli[i].tv.tv_usec) {
 				diff1.tv_usec = 1000000 + tp.tv_usec - cli[i].tv.tv_usec;
-				diff1.tv_sec = diff1.tv_sec - 1;
+				diff1.tv_sec--;
 			} else {
 				diff1.tv_usec = tp.tv_usec - cli[i].tv.tv_usec;
 			}
 
-			logout(3, "client #%03d (id: %05d) diff: %d.%06ld", i, cli[i].id, diff1.tv_sec, diff1.tv_usec);
+			logout(3, "client #%03d (id: %05d) diff: %d.%06ld",
+			    cli[i].num, cli[i].id, diff1.tv_sec, diff1.tv_usec);
 
 			if (diff1.tv_usec > 0 && diff1.tv_sec >= diff.tv_sec && diff1.tv_usec > diff.tv_usec) {
 				diff = diff1;
@@ -493,7 +574,8 @@ find_timeouted(struct timeval tp)
 	for (i = 0; i < clients; i++) {
 		if (cli[i].inuse == 1) {
 
-			logout(3, "client #%03d (id: %05d) timeouted: %d.%06ld", i, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
+			logout(3, "client #%03d (id: %05d) timeouted: %d.%06ld",
+			    cli[i].num, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
 
 			if (tp.tv_sec > cli[i].tv.tv_sec) {
 				if (tp.tv_usec < cli[i].tv.tv_usec) {
@@ -517,9 +599,19 @@ find_timeouted(struct timeval tp)
 static void
 make_stat(void)
 {
-	fprintf(stderr,
+	FILE *fh;
+
+	fh = fopen(stat_file, "w");
+	if (fh == NULL) {
+		logerr(1, "Cannot open stat file: %s", stat_file);
+		return;
+	}
+
+	fprintf(fh,
 	    "Requests (in):  %lu\n"
 	    "Requests (out): %lu\n",
 	    requests_cli,
 	    requests_srv);
+
+	fclose(fh);
 }

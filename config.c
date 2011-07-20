@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Andrey Zonov <andrey.zonov@gmail.com>
+ * Copyright (c) 2010 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -61,7 +61,7 @@ config_init(const char *path)
 
 	config = fopen(path, "r");
 	if (config == NULL)
-		err(1, "Can not open config file: %s", path);
+		err(1, "Cannot open config file: %s", path);
 
 	lines = 0;
 	servers = 0;
