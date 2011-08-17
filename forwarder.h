@@ -64,7 +64,7 @@ struct client_s {
 	server_t *srv;
 	struct timeval tv;
 	sock_t sock;
-	char buf[BUF_SIZ];
+	char *buf;
 };
 
 typedef struct client_s client_t;

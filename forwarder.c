@@ -56,7 +56,7 @@ static client_t *cli;
 static unsigned long requests_cli;
 static unsigned long requests_srv;
 static unsigned int weight;
-static int *srvs;
+static server_t **srvs;
 static int stat_flag = 0;
 
 static void usage(void);
@@ -66,13 +66,13 @@ static void sock_init(void);
 static void sig_init(void);
 static void sig_handler(int signum);
 static void mainloop(void);
-static ssize_t recv_udp(int s, void *buf, size_t len, sock_t *sock, int *id);
-static ssize_t send_udp(int s, const void *buf, size_t len, sock_t *sock);
-static int find_newcli(client_t *c);
-static int find_cli(int id);
-static int find_srv(client_t *c);
+static ssize_t recv_udp(int fd, void *buf, size_t len, sock_t *sock, int *id);
+static ssize_t send_udp(int fd, const void *buf, size_t len, sock_t *sock);
+static client_t *find_newcli(client_t *c);
+static client_t *find_cli(int id);
+static server_t *find_srv(client_t *c);
 static int find_timeout(struct timeval tp);
-static int find_timeouted(struct timeval tp);
+static client_t *find_timeouted(struct timeval tp);
 static void make_stat(void);
 
 int
@@ -170,14 +170,14 @@ srv_init(void)
 	for (i = 0; i < servers; i++)
 		weight += srv[i].conf_weight;
 
-	srvs = malloc(sizeof(int) * weight);
+	srvs = malloc(sizeof(server_t *) * weight);
 	if (srvs == NULL)
 		err(1, "malloc()");
 
 	n = 0;
 	for (i = 0; i < servers; i++) {
 		for (j = 0; j < srv[i].conf_weight; j++) {
-			srvs[n] = i;
+			srvs[n] = &srv[i];
 			n++;
 		}
 	}
@@ -272,12 +272,10 @@ mainloop(void)
 	int kq;
 	int nc;
 	int to;
-	int cli_idx;
-	int srv_idx;
 	int active;
 	ssize_t n;
 	void *ptr;
-	char buf[BUF_SIZ];
+	char *buf;
 	struct kevent *ch;
 	struct kevent *ev;
 	struct timespec *timeout;
@@ -285,6 +283,8 @@ mainloop(void)
 	struct timeval tp;
 	client_t cli1;
 	server_t srv1;
+	client_t *clip;
+	server_t *srvp;
 
 	/* Initialization */
 	bzero(&cli1.sock.addr, sizeof(struct sockaddr_in));
@@ -307,6 +307,12 @@ mainloop(void)
 	kq = kqueue();
 	if (kq == -1) {
 		logerr(1, "kqueue()");
+		exit(1);
+	}
+
+	buf = malloc(BUF_SIZ);
+	if (buf == NULL) {
+		logerr(1, "malloc()");
 		exit(1);
 	}
 
@@ -354,48 +360,55 @@ mainloop(void)
 				if (n <= 0)
 					continue;
 
-				cli_idx = find_newcli(&cli1);
-				if (cli_idx == -1) {
+				clip = find_newcli(&cli1);
+				if (clip == NULL) {
 					logout(1, "Max clients reached");
 					continue;
 				}
 
-				cli[cli_idx].id = cli1.id;
-				memcpy(&cli[cli_idx].sock, &cli1.sock, sizeof(sock_t));
-				memcpy(cli[cli_idx].buf, buf, n);
+				memcpy(&clip->sock, &cli1.sock, sizeof(sock_t));
+				clip->id = cli1.id;
+				clip->buf = buf;
+
+				buf = malloc(BUF_SIZ);
+				if (buf == NULL) {
+					logerr(1, "malloc()");
+					exit(1);
+				}
 
 				requests_cli++;
-				cli[cli_idx].tv = tp;
-				ptr = cli[cli_idx].buf;
+				clip->tv = tp;
+				ptr = clip->buf;
 
 				/* Send request to DNS server */
 				requests_srv++;
-				cli[cli_idx].ret++;
-				srv_idx = find_srv(&cli[cli_idx]);
-				cli[cli_idx].srv = &srv[srv_idx];
-				cli[cli_idx].srv->send++;
-				send_udp(clisock, ptr, n, &srv[srv_idx].sock);
+				clip->ret++;
+				srvp = find_srv(clip);
+				clip->srv = srvp;
+				clip->srv->send++;
+				send_udp(clisock, ptr, n, &srvp->sock);
 			} else {
 				/* Read answer from DNS server */
 				n = recv_udp(clisock, buf, BUF_SIZ, &srv1.sock, &id);
 				if (n <= 0)
 					continue;
 
-				cli_idx = find_cli(id);
-				if (cli_idx == -1) {
+				clip = find_cli(id);
+				if (clip == NULL) {
 					logout(1, "Cannot find client (id: %05d)", id);
 					continue;
 				}
 
-				cli[cli_idx].srv->recv++;
+				clip->srv->recv++;
 
-				if (strncmp(cli[cli_idx].srv->name, "95.108.142.2", IP_LEN) == 0)
-					logout(1, "Client id: %03d (ret: %d); request id: %05d",
-					    cli_idx, cli[cli_idx].ret, id);
+				if (strncmp(clip->srv->name, "95.108.142.2", IP_LEN) == 0)
+					logout(1, "client #%03d (ret: %d); request id: %05d",
+					    clip->num, clip->ret, id);
 
 				/* Send answer to client */
-				send_udp(srvsock, buf, n, &cli[cli_idx].sock);
-				cli[cli_idx].inuse = 0;
+				send_udp(srvsock, buf, n, &clip->sock);
+				clip->inuse = 0;
+				free(clip->buf);
 				active_clients--;
 			}
 		}
@@ -404,23 +417,23 @@ mainloop(void)
 		active = active_clients;
 		for (i = 0; i < clients; i++) {
 			if (cli[i].inuse == 1) {
-				cli_idx = find_timeouted(tp);
-				if (cli_idx == -1)
+				clip = find_timeouted(tp);
+				if (clip == NULL)
 					continue;
 
-				logout(3, "client #%03d (id: %05d) timeouted", cli[cli_idx].num, cli[cli_idx].id);
+				logout(3, "client #%03d (id: %05d) timeouted", clip->num, clip->id);
 
-				cli[cli_idx].tv = tp;
-				ptr = cli[cli_idx].buf;
+				clip->tv = tp;
+				ptr = clip->buf;
 
 				/* Send request to DNS server */
 				requests_srv++;
-				cli[cli_idx].ret++;
-				srv_idx = find_srv(&cli[cli_idx]);
-				cli[cli_idx].srv = &srv[srv_idx];
-				cli[cli_idx].srv->send++;
+				clip->ret++;
+				srvp = find_srv(clip);
+				clip->srv = srvp;
+				clip->srv->send++;
 
-				send_udp(clisock, ptr, n, &srv[srv_idx].sock);
+				send_udp(clisock, ptr, n, &srvp->sock);
 
 				while (--active > 0) {
 					break;
@@ -431,7 +444,7 @@ mainloop(void)
 }
 
 static ssize_t
-recv_udp(int s, void *buf, size_t len, sock_t *sock, int *id)
+recv_udp(int fd, void *buf, size_t len, sock_t *sock, int *id)
 {
 	ssize_t n;
 	short int dns_id;
@@ -442,7 +455,7 @@ recv_udp(int s, void *buf, size_t len, sock_t *sock, int *id)
 	fromlen = &(sock->len);
 
 	do {
-		n = recvfrom(s, buf, len, 0, (struct sockaddr *)from, fromlen);
+		n = recvfrom(fd, buf, len, 0, (struct sockaddr *)from, fromlen);
 	} while (n == -1 && errno == EINTR);
 
 	if (n == -1) {
@@ -458,7 +471,7 @@ recv_udp(int s, void *buf, size_t len, sock_t *sock, int *id)
 }
 
 static ssize_t
-send_udp(int s, const void *buf, size_t len, sock_t *sock)
+send_udp(int fd, const void *buf, size_t len, sock_t *sock)
 {
 	ssize_t n;
 	short int dns_id;
@@ -469,7 +482,7 @@ send_udp(int s, const void *buf, size_t len, sock_t *sock)
 	tolen = sock->len;
 
 	do {
-		n = sendto(s, buf, len, 0, (const struct sockaddr *)to, tolen);
+		n = sendto(fd, buf, len, 0, (const struct sockaddr *)to, tolen);
 	} while (n == -1 && errno == EINTR);
 
 	if (n == -1) {
@@ -483,16 +496,16 @@ send_udp(int s, const void *buf, size_t len, sock_t *sock)
 	return (n);
 }
 
-static int
+static client_t *
 find_newcli(client_t *c)
 {
 	int i;
+	client_t *clip;
 
-	for (i = 0; i < clients; i++) {
-		if (cli[i].inuse == 1 && cli[i].id == c->id) {
-			logout(1, "duplicate id: %d", c->id);
-			return (i);
-		}
+	clip = find_cli(c->id);
+	if (clip != NULL) {
+		logout(1, "duplicate id: %d", c->id);
+		return(clip);
 	}
 
 	for (i = 0; i < clients; i++) {
@@ -501,39 +514,37 @@ find_newcli(client_t *c)
 			cli[i].ret = 0;
 			cli[i].num = requests_cli;
 			active_clients++;
-			return (i);
+			return (&cli[i]);
 		}
 	}
 
-	return (-1);
+	return (NULL);
 }
 
-static int
+static client_t *
 find_cli(int id)
 {
 	int i;
 
 	for (i = 0; i < clients; i++) {
-		if (cli[i].inuse == 1) {
-			if (cli[i].id == id) {
-				return (i);
-			}
+		if (cli[i].inuse == 1 && cli[i].id == id) {
+			return (&cli[i]);
 		}
 	}
 
-	return (-1);
+	return (NULL);
 }
 
-static int
+static server_t *
 find_srv(client_t *c)
 {
-	int i;
+	server_t *s;
 
-	i = srvs[(requests_srv - 1) % weight];
+	s = srvs[(requests_srv - 1) % weight];
 	logout(3, "server #%02d found (id: %d, request: %d, weight: %d/%d)",
-	    i, c->id, requests_srv, srv[i].conf_weight, weight);
+	    s->id, c->id, requests_srv, s->conf_weight, weight);
 
-	return (i);
+	return (s);
 }
 
 static int
@@ -590,7 +601,7 @@ find_timeout(struct timeval tp)
 	return (to);
 }
 
-static int
+static client_t *
 find_timeouted(struct timeval tp)
 {
 	int i;
@@ -607,11 +618,11 @@ find_timeouted(struct timeval tp)
 			if (tp.tv_sec > cli[i].tv.tv_sec) {
 				if (tp.tv_usec < cli[i].tv.tv_usec) {
 					if (1000000 + tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
-						return (i);
+						return (&cli[i]);
 					}
 				}
 			} else if (tp.tv_sec == cli[i].tv.tv_sec && tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
-				return (i);
+				return (&cli[i]);
 			}
 
 			while (--active > 0) {
@@ -620,7 +631,7 @@ find_timeouted(struct timeval tp)
 		}
 	}
 
-	return (-1);
+	return (NULL);
 }
 
 static void

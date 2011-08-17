@@ -47,6 +47,7 @@ void
 config_init(const char *path)
 {
 	int i;
+	int id;
 	int port;
 	int weight;
 	int line;
@@ -63,6 +64,7 @@ config_init(const char *path)
 	if (config == NULL)
 		err(1, "Cannot open config file: %s", path);
 
+	id = 0;
 	line = 0;
 	servers = 0;
 	srv = NULL;
@@ -201,6 +203,8 @@ config_init(const char *path)
 				}
 
 				srv[servers - 1].conf_weight = weight;
+				srv[servers - 1].id = id;
+				id++;
 			} else
 				config_err(buf, line, len1 - len);
 		}
