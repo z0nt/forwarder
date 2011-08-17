@@ -41,7 +41,7 @@
 
 #define MAX_LINE_LEN LINE_MAX
 
-static void config_err(int lines, size_t len);
+static void config_err(const char *buf, int line, size_t len);
 
 void
 config_init(const char *path)
@@ -49,7 +49,7 @@ config_init(const char *path)
 	int i;
 	int port;
 	int weight;
-	int lines;
+	int line;
 	size_t len;
 	size_t len1;
 	FILE *config;
@@ -63,23 +63,21 @@ config_init(const char *path)
 	if (config == NULL)
 		err(1, "Cannot open config file: %s", path);
 
-	lines = 0;
+	line = 0;
 	servers = 0;
 	srv = NULL;
 	while ((p = fgets(buf, MAX_LINE_LEN, config)) != NULL) {
-		lines++;
+		line++;
 		len1 = strlen(buf);
 		len = len1;
 
-		if (len == 0) {
+		if (len == 0)
 			continue;
-		}
 
 		while (len > 0) {
 
-			if (*p == '\n' || *p == '\r' || *p == '\0' || *p == '#') {
+			if (*p == '\n' || *p == '\r' || *p == '\0' || *p == '#')
 				break;
-			}
 
 			while (*p == ' ' || *p == '\t') {
 				len--;
@@ -95,9 +93,8 @@ config_init(const char *path)
 				p += sizeof("nameserver") - 1;
 				servers++;
 
-				if (len <= 0) {
-					config_err(lines, len1 - len);
-				}
+				if (len <= 0)
+					config_err(buf, line, len1 - len);
 
 				while (*p == ' ' || *p == '\t') {
 					len--;
@@ -118,12 +115,12 @@ config_init(const char *path)
 						p++;
 					}
 				}
-				if (ip[0] == '\0') {
-					config_err(lines, len1 - len);
-				}
-				if (inet_addr(ip) == -1) {
-					config_err(lines, len1 - len);
-				}
+
+				if (ip[0] == '\0')
+					config_err(buf, line, len1 - len);
+
+				if (inet_addr(ip) == -1)
+					config_err(buf, line, len1 - len);
 	
 				/* port number */
 				strport[0] = '\0';
@@ -135,9 +132,8 @@ config_init(const char *path)
 				}
 
 				/* skip spaces and commentaries */
-				if (!(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0')) {
-					config_err(lines, len1 - len);
-				}
+				if (!(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0'))
+					config_err(buf, line, len1 - len);
 
 				while (*p == ' ' || *p == '\t') {
 					len--;
@@ -151,9 +147,8 @@ config_init(const char *path)
 					len -= sizeof("weight") - 1;
 					p += sizeof("weight") - 1;
 
-					if (len <= 0) {
-						config_err(lines, len1 - len);
-					}
+					if (len <= 0)
+						config_err(buf, line, len1 - len);
 
 					while (*p == ' ' || *p == '\t') {
 						len--;
@@ -170,18 +165,16 @@ config_init(const char *path)
 				}
 
 				/* skip spaces and commentaries */
-				if (!(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0')) {
-					config_err(lines, len1 - len);
-				}
+				if (!(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0'))
+					config_err(buf, line, len1 - len);
 
 				while (*p == ' ' || *p == '\t') {
 					len--;
 					p++;
 				}
 
-				if (!(*p == '\n' || *p == '\r' || *p == '\0' || *p == '#')) {
-					config_err(lines, len1 - len);
-				}
+				if (!(*p == '\n' || *p == '\r' || *p == '\0' || *p == '#'))
+					config_err(buf, line, len1 - len);
 
 				/* save parsed data */
 				srv = realloc(srv, sizeof(server_t) * (servers));
@@ -189,34 +182,39 @@ config_init(const char *path)
 					err(1, "realloc()");
 
 				port = atoi(strport);
-				if (port < 0 || port > 65535) {
-					config_err(lines, len1 - len);
-				} else if (port == 0) {
+				if (port < 0 || port > 65535)
+					config_err(buf, line, len1 - len);
+				else if (port == 0)
 					port = PORT;
-				}
 
 				srv[servers - 1].port = port;
 
-				strcpy(srv[servers - 1].name, ip);
+				strncpy(srv[servers - 1].name, ip, IP_LEN);
+				srv[servers - 1].name[IP_LEN] = '\0';
 
 				weight = atoi(strweight);
-				if (weight < 0 || weight > 65535) {
-					config_err(lines, len1 - len);
-				} else if (weight == 0) {
+				if (weight < 0 || weight > 65535)
+					config_err(buf, line, len1 - len);
+				else if (weight == 0) {
 					/* XXX */
 					weight = 1;
 				}
 
 				srv[servers - 1].conf_weight = weight;
-			} else {
-				config_err(lines, len1 - len);
-			}
+			} else
+				config_err(buf, line, len1 - len);
 		}
 	}
 }
 
 static void
-config_err(int lines, size_t len)
+config_err(const char *buf, int line, size_t len)
 {
-	errx(1, "Parsing error: %d, %ld", lines, len);
+	fprintf(stderr,
+	    "Parsing error: %d:%ld\n"
+	    "%s"
+	    "%*s^",
+	    line, len, buf, (int)(len - 1), " ");
+
+	exit(1);
 }

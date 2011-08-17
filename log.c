@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Andrey Zonov <andrey@zonov.org>
+ * Copyright (c) 2010, 2011 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -40,6 +40,8 @@
 
 #include "log.h"
 
+static void _log(const int print_errno, const int level, const char *fmt, va_list ap);
+
 void
 loginit(const char *logfile)
 {
@@ -58,112 +60,47 @@ loginit(const char *logfile)
 void
 logout(const int level, const char *fmt, ...)
 {
-	int n, m;
-	long int usec;
-	char *nlevel;
-	char buf[PIPE_BUF], *bufp;
 	va_list ap;
-	time_t tv_time_t;
-	struct timeval tv;
-	struct tm *lt;
-
-	n = m = 0;
-	bufp = buf;
-
-	if (level > debug_level)
-		return;
-
-	if (syslog_flag) {
-		va_start(ap, fmt);
-		n = vsnprintf(bufp, PIPE_BUF, fmt, ap);
-		va_end(ap);
-
-		switch(level) {
-		case 1:
-			syslog(LOG_ERR, buf);
-			break;
-		case 2:
-			syslog(LOG_WARNING, buf);
-			break;
-		case 3:
-			syslog(LOG_DEBUG, buf);
-			break;
-		default:
-			break;
-		}
-
-		return;
-	}
-
-	gettimeofday(&tv, (struct timezone *)NULL);
-	tv_time_t = tv.tv_sec;
-	lt = localtime(&tv_time_t);
-	lt->tm_mon++;
-	lt->tm_year += 1900;
-	usec = tv.tv_usec;
-
-	switch(level) {
-		case 1:
-			nlevel = "error";
-			break;
-		case 2:
-			nlevel = "warn";
-			break;
-		case 3:
-			nlevel = "debug";
-			break;
-		default:
-			break;
-	}
-
-	n = snprintf(bufp, PIPE_BUF, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ",
-	    lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
-	bufp += n;
-	m +=n;
 
 	va_start(ap, fmt);
-	if (fmt != NULL) {
-		n = vsnprintf(bufp, (PIPE_BUF - m), fmt, ap);
-		bufp += n;
-		m += n;
-	}
+	_log(0, level, fmt, ap);
 	va_end(ap);
-
-	if (m >= PIPE_BUF) {
-		bufp += - m + PIPE_BUF - 2;
-		m = PIPE_BUF - 2;
-	}
-
-	n = snprintf(bufp, (PIPE_BUF - m), "\n");
-	m += n;
-
-	write(logfd, buf, m);
 }
 
 void
 logerr(const int level, const char *fmt, ...)
 {
-	int n, m;
-	long int usec;
-	char *nlevel;
-	char buf[PIPE_BUF], *bufp, errbuf[PIPE_BUF], *errbufp;
 	va_list ap;
-	time_t tv_time_t;
+
+	va_start(ap, fmt);
+	_log(1, level, fmt, ap);
+	va_end(ap);
+}
+
+static void
+_log(const int print_errno, const int level, const char *fmt, va_list ap)
+{
+	int n, avail;
+	char *nlevel;
+	char buf[PIPE_BUF], *bufp, errbuf[PIPE_BUF];
+	long int usec;
 	struct timeval tv;
+	time_t tv_time;
 	struct tm *lt;
 
-	n = m = 0;
+	avail = PIPE_BUF;
 	bufp = buf;
-	errbufp = errbuf;
 
 	if (level > debug_level)
 		return;
 
 	if (syslog_flag) {
-		va_start(ap, fmt);
-		n = vsnprintf(bufp, PIPE_BUF, fmt, ap);
-		snprintf(bufp + n, (PIPE_BUF - n), " (%d: %%m)", errno);
-		va_end(ap);
+		n = vsnprintf(bufp, avail, fmt, ap);
+		bufp += n;
+		avail -= n;
+
+		if (print_errno)
+			snprintf(bufp, avail, " (%d: %%m)", errno);
 
 		switch(level) {
 		case 1:
@@ -183,8 +120,8 @@ logerr(const int level, const char *fmt, ...)
 	}
 
 	gettimeofday(&tv, (struct timezone *)NULL);
-	tv_time_t = tv.tv_sec;
-	lt = localtime(&tv_time_t);
+	tv_time = tv.tv_sec;
+	lt = localtime(&tv_time);
 	lt->tm_mon++;
 	lt->tm_year += 1900;
 	usec = tv.tv_usec;
@@ -203,31 +140,30 @@ logerr(const int level, const char *fmt, ...)
 			break;
 	}
 
-	n = snprintf(bufp, PIPE_BUF, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ",
+	n = snprintf(bufp, avail, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ",
 	    lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
 	bufp += n;
-	m +=n;
+	avail -= n;
 
-	va_start(ap, fmt);
-	if (fmt != NULL) {
-		n = vsnprintf(bufp, (PIPE_BUF - m), fmt, ap);
-		bufp += n;
-		m += n;
-	}
-	va_end(ap);
-
-	strerror_r(errno, errbufp, PIPE_BUF - m);
-	n = snprintf(bufp, (PIPE_BUF - m), " (%d: %s)", errno, errbuf);
+	n = vsnprintf(bufp, avail, fmt, ap);
 	bufp += n;
-	m += n;
+	avail -= n;
 
-	if (m >= PIPE_BUF) {
-		bufp += - m + PIPE_BUF - 2;
-		m = PIPE_BUF - 2;
+	if (print_errno) {
+		strerror_r(errno, errbuf, sizeof(errbuf));
+		n = snprintf(bufp, avail, " (%d: %s)", errno, errbuf);
+		bufp += n;
+		avail -= n;
 	}
 
-	n = snprintf(bufp, (PIPE_BUF - m), "\n");
-	m += n;
+	/* Truncate overflowed string */
+	if (avail <= 0) {
+		bufp = buf + PIPE_BUF - 2;
+		avail = 2;
+	}
 
-	write(logfd, buf, m);
+	n = snprintf(bufp, avail, "\n");
+	avail -= n;
+
+	write(logfd, buf, sizeof(buf) - avail);
 }
