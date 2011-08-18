@@ -59,6 +59,7 @@ config_init(const char *path)
 	char strport[PORT_LEN];
 	char strweight[WEIGHT_LEN];
 	char *p;
+	server_t *s;
 
 	config = fopen(path, "r");
 	if (config == NULL)
@@ -67,7 +68,7 @@ config_init(const char *path)
 	id = 0;
 	line = 0;
 	servers = 0;
-	srv = NULL;
+	STAILQ_INIT(&srvq);
 	while ((p = fgets(buf, MAX_LINE_LEN, config)) != NULL) {
 		line++;
 		len1 = strlen(buf);
@@ -94,6 +95,9 @@ config_init(const char *path)
 				len -= sizeof("nameserver") - 1;
 				p += sizeof("nameserver") - 1;
 				servers++;
+				s = malloc(sizeof(server_t));
+				if (s == NULL)
+					err(1, "malloc()");
 
 				if (len <= 0)
 					config_err(buf, line, len1 - len);
@@ -179,20 +183,16 @@ config_init(const char *path)
 					config_err(buf, line, len1 - len);
 
 				/* save parsed data */
-				srv = realloc(srv, sizeof(server_t) * (servers));
-				if (srv == NULL)
-					err(1, "realloc()");
-
 				port = atoi(strport);
 				if (port < 0 || port > 65535)
 					config_err(buf, line, len1 - len);
 				else if (port == 0)
 					port = PORT;
 
-				srv[servers - 1].port = port;
+				s->port = port;
 
-				strncpy(srv[servers - 1].name, ip, IP_LEN);
-				srv[servers - 1].name[IP_LEN] = '\0';
+				strncpy(s->name, ip, IP_LEN);
+				s->name[IP_LEN] = '\0';
 
 				weight = atoi(strweight);
 				if (weight < 0 || weight > 65535)
@@ -202,9 +202,10 @@ config_init(const char *path)
 					weight = 1;
 				}
 
-				srv[servers - 1].conf_weight = weight;
-				srv[servers - 1].id = id;
+				s->conf_weight = weight;
+				s->id = id;
 				id++;
+				STAILQ_INSERT_TAIL(&srvq, s, next);
 			} else
 				config_err(buf, line, len1 - len);
 		}

@@ -158,23 +158,24 @@ usage(void)
 static void
 srv_init(void)
 {
-	int i, j, n;
+	int i, n;
+	server_t *s;
 
 	/* Init sockaddr structures */
-	for (i = 0; i < servers; i++) {
-		bzero(&srv[i].addr.sin, sizeof(struct sockaddr_in));
-		srv[i].addr.len = sizeof(struct sockaddr_in);
-		srv[i].addr.sin.sin_family = PF_INET;
-		srv[i].addr.sin.sin_port = htons(srv[i].port);
-		srv[i].addr.sin.sin_addr.s_addr = inet_addr(srv[i].name);
-		if (srv[i].addr.sin.sin_addr.s_addr == INADDR_NONE)
+	STAILQ_FOREACH(s, &srvq, next) {
+		bzero(&s->addr.sin, sizeof(struct sockaddr_in));
+		s->addr.len = sizeof(struct sockaddr_in);
+		s->addr.sin.sin_family = PF_INET;
+		s->addr.sin.sin_port = htons(s->port);
+		s->addr.sin.sin_addr.s_addr = inet_addr(s->name);
+		if (s->addr.sin.sin_addr.s_addr == INADDR_NONE)
 			err(1, "inet_addr()");
 	}
 
 	weight = 0;
-	for (i = 0; i < servers; i++) {
-		weight += srv[i].conf_weight;
-		srv[i].weight = srv[i].conf_weight;
+	STAILQ_FOREACH(s, &srvq, next) {
+		weight += s->conf_weight;
+		s->weight = s->conf_weight;
 	}
 
 	srvs = malloc(sizeof(server_t *) * weight);
@@ -182,9 +183,9 @@ srv_init(void)
 		err(1, "malloc()");
 
 	n = 0;
-	for (i = 0; i < servers; i++) {
-		for (j = 0; j < srv[i].conf_weight; j++) {
-			srvs[n] = &srv[i];
+	STAILQ_FOREACH(s, &srvq, next) {
+		for (i = 0; i < s->conf_weight; i++) {
+			srvs[n] = s;
 			n++;
 		}
 	}
@@ -516,11 +517,11 @@ find_srv(client_t *c)
 static server_t *
 find_srv_by_addr(addr_t *addr)
 {
-	int i;
+	server_t *s;
 
-	for (i = 0; i < servers; i++) {
-		if (strncmp(inet_ntoa(addr->sin.sin_addr), srv[i].name, IP_LEN) == 0)
-			return (&srv[i]);
+	STAILQ_FOREACH(s, &srvq, next) {
+		if (strncmp(inet_ntoa(addr->sin.sin_addr), s->name, IP_LEN) == 0)
+			return (s);
 	}
 
 	return (NULL);
@@ -659,8 +660,8 @@ find_timeout(struct timeval tp, struct timespec *timeout)
 static void
 make_stat(void)
 {
-	int i;
 	FILE *fh;
+	server_t *s;
 
 	fh = fopen(stat_file, "w");
 	if (fh == NULL) {
@@ -682,8 +683,8 @@ make_stat(void)
 	    max_active_clients,
 	    max_tries_clients);
 
-	for (i = 0; i < servers; i++)
-		fprintf(fh, "%s: send %zu, recv %zu, weight: %d\n", srv[i].name, srv[i].send, srv[i].recv, srv[i].weight);
+	STAILQ_FOREACH(s, &srvq, next)
+		fprintf(fh, "%s: send %zu, recv %zu, weight: %d\n", s->name, s->send, s->recv, s->weight);
 
 	fclose(fh);
 }
@@ -692,6 +693,7 @@ static void
 cleanup(void)
 {
 	int i;
+	server_t *s;
 
 	for (i = 0; i < clients; i++)
 		if (cli[i].inuse == 1)
@@ -699,6 +701,10 @@ cleanup(void)
 
 	free(cli);
 	free(srvs);
-	free(srv);
+	while (!STAILQ_EMPTY(&srvq)) {
+		s = STAILQ_FIRST(&srvq);
+		STAILQ_REMOVE_HEAD(&srvq, next);
+		free(s);
+	}
 	exit(0);
 }

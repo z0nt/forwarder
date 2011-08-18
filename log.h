@@ -23,6 +23,9 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef _LOG_H
+#define _LOG_H
+
 #define MIN_DEBUG_LEVEL	0	/* quiet */
 #define MAX_DEBUG_LEVEL	3	/* debug */
 
@@ -33,3 +36,5 @@ int logfd;
 void loginit(const char *logfile);
 void logout(const int level, const char *fmt, ...);
 void logerr(const int level, const char *fmt, ...);
+
+#endif

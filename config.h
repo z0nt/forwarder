@@ -23,4 +23,9 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef _CONFIG_H
+#define _CONFIG_H
+
 void config_init(const char *path);
+
+#endif

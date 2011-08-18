@@ -23,6 +23,11 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef _FORWARDER_H
+#define _FORWARDER_H
+
+#include <sys/queue.h>
+
 /*#define HOST	INADDR_ANY*/
 #define HOST	"127.0.0.2"
 #define PORT	53
@@ -52,7 +57,9 @@ struct server_s {
 	size_t recv;
 	addr_t addr;
 	char name[IP_LEN];
+	STAILQ_ENTRY(server_s) next;
 };
+STAILQ_HEAD(, server_s) srvq;
 
 typedef struct server_s server_t;
 
@@ -77,4 +84,5 @@ struct client_s {
 typedef struct client_s client_t;
 
 int servers;
-server_t *srv;
+
+#endif
