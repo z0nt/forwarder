@@ -51,13 +51,16 @@ static char *stat_file;
 static int srvsock;
 static int clisock;
 static int active_clients;
+static int max_active_clients;
+static int max_tries_clients;
 static int clients;
 static client_t *cli;
 static unsigned long requests_cli;
 static unsigned long requests_srv;
+static unsigned long requests_dup;
 static unsigned int weight;
 static server_t **srvs;
-static int stat_flag = 0;
+static volatile sig_atomic_t sig_flag = 0;
 
 static void usage(void);
 static void srv_init(void);
@@ -66,14 +69,16 @@ static void sock_init(void);
 static void sig_init(void);
 static void sig_handler(int signum);
 static void mainloop(void);
-static ssize_t recv_udp(int fd, void *buf, size_t len, sock_t *sock, int *id);
-static ssize_t send_udp(int fd, const void *buf, size_t len, sock_t *sock);
-static client_t *find_newcli(client_t *c);
-static client_t *find_cli(int id);
+static ssize_t recv_udp(int fd, buf_t *buf, addr_t *addr, int *id);
+static ssize_t send_udp(int fd, buf_t *buf, addr_t *addr);
 static server_t *find_srv(client_t *c);
-static int find_timeout(struct timeval tp);
+static server_t *find_srv_by_addr(addr_t *addr);
+static client_t *find_newcli(int id);
+static client_t *find_cli(int id);
 static client_t *find_timeouted(struct timeval tp);
+static void find_timeout(struct timeval tp, struct timespec *timeout);
 static void make_stat(void);
+static void cleanup(void);
 
 int
 main(int argc, char **argv)
@@ -157,18 +162,20 @@ srv_init(void)
 
 	/* Init sockaddr structures */
 	for (i = 0; i < servers; i++) {
-		bzero(&srv[i].sock.addr, sizeof(struct sockaddr_in));
-		srv[i].sock.len = sizeof(struct sockaddr_in);
-		srv[i].sock.addr.sin_family = PF_INET;
-		srv[i].sock.addr.sin_port = htons(srv[i].port);
-		srv[i].sock.addr.sin_addr.s_addr = inet_addr(srv[i].name);
-		if (srv[i].sock.addr.sin_addr.s_addr == INADDR_NONE)
+		bzero(&srv[i].addr.sin, sizeof(struct sockaddr_in));
+		srv[i].addr.len = sizeof(struct sockaddr_in);
+		srv[i].addr.sin.sin_family = PF_INET;
+		srv[i].addr.sin.sin_port = htons(srv[i].port);
+		srv[i].addr.sin.sin_addr.s_addr = inet_addr(srv[i].name);
+		if (srv[i].addr.sin.sin_addr.s_addr == INADDR_NONE)
 			err(1, "inet_addr()");
 	}
 
 	weight = 0;
-	for (i = 0; i < servers; i++)
+	for (i = 0; i < servers; i++) {
 		weight += srv[i].conf_weight;
+		srv[i].weight = srv[i].conf_weight;
+	}
 
 	srvs = malloc(sizeof(server_t *) * weight);
 	if (srvs == NULL)
@@ -195,8 +202,8 @@ cli_init(void)
 
 	for (i = 0; i < clients; i++) {
 		cli[i].inuse = 0;
-		bzero(&cli[i].sock.addr, sizeof(struct sockaddr_in));
-		cli[i].sock.len = sizeof(struct sockaddr_in);
+		bzero(&cli[i].addr.sin, sizeof(struct sockaddr_in));
+		cli[i].addr.len = sizeof(struct sockaddr_in);
 	}
 }
 
@@ -256,11 +263,9 @@ sig_handler(int signum)
 {
 	if (signum == SIGINFO) {
 		if (stat_file)
-			stat_flag = 1;
-	} else {
-		/* XXX */
-		exit(0);
-	}
+			sig_flag = 1;
+	} else
+		sig_flag = 2;
 }
 
 static void
@@ -271,26 +276,19 @@ mainloop(void)
 	int id;
 	int kq;
 	int nc;
-	int to;
-	int active;
 	ssize_t n;
-	void *ptr;
-	char *buf;
 	struct kevent *ch;
 	struct kevent *ev;
 	struct timespec *timeout;
-	struct timespec tv;
+	struct timespec to;
 	struct timeval tp;
-	client_t cli1;
-	server_t srv1;
-	client_t *clip;
-	server_t *srvp;
+	buf_t buf;
+	addr_t addr;
+	client_t *c;
 
 	/* Initialization */
-	bzero(&cli1.sock.addr, sizeof(struct sockaddr_in));
-	cli1.sock.len = sizeof(struct sockaddr_in);
-	bzero(&srv1.sock.addr, sizeof(struct sockaddr_in));
-	srv1.sock.len = sizeof(struct sockaddr_in);
+	bzero(&addr.sin, sizeof(struct sockaddr_in));
+	addr.len = sizeof(struct sockaddr_in);
 
 	ch = calloc(1, sizeof(struct kevent) * 2);
 	if (ch == NULL) {
@@ -310,8 +308,9 @@ mainloop(void)
 		exit(1);
 	}
 
-	buf = malloc(BUF_SIZ);
-	if (buf == NULL) {
+	buf.len = BUF_SIZ;
+	buf.data = malloc(buf.len);
+	if (buf.data == NULL) {
 		logerr(1, "malloc()");
 		exit(1);
 	}
@@ -329,17 +328,19 @@ mainloop(void)
 		if (active_clients == 0) {
 			timeout = NULL;
 		} else {
-			to = find_timeout(tp);
-			tv.tv_sec = 0;
-			tv.tv_nsec = to * 1000;
-			timeout = &tv;
+			find_timeout(tp, &to);
+			timeout = &to;
 		}
 
 		do {
 			k = kevent(kq, ch, nc, ev, 2 /* number of sockets */, timeout);
-			if (stat_flag == 1) {
+			if (sig_flag == 1) {
 				make_stat();
-				stat_flag = 0;
+				sig_flag = 0;
+			} else if (sig_flag == 2) {
+				free(ev);
+				free(ch);
+				cleanup();
 			}
 		} while (k == -1 && errno == EINTR);
 
@@ -354,108 +355,112 @@ mainloop(void)
 			logout(3, "kevent() timeouted");
 
 		for (i = 0; i < k; i++) {
+			buf.len = BUF_SIZ; /* XXX */
 			if (ev[i].ident == srvsock) {
 				/* Read request from client */
-				n = recv_udp(srvsock, buf, BUF_SIZ, &cli1.sock, &cli1.id);
+				n = recv_udp(srvsock, &buf, &addr, &id);
 				if (n <= 0)
 					continue;
 
-				clip = find_newcli(&cli1);
-				if (clip == NULL) {
+				c = find_newcli(id);
+				if (c == NULL) {
 					logout(1, "Max clients reached");
 					continue;
 				}
 
-				memcpy(&clip->sock, &cli1.sock, sizeof(sock_t));
-				clip->id = cli1.id;
-				clip->buf = buf;
+				memcpy(&c->addr, &addr, sizeof(addr_t));
+				c->id = id;
+				c->buf.data = buf.data;
+				c->buf.len = n;
 
-				buf = malloc(BUF_SIZ);
-				if (buf == NULL) {
+				buf.data = malloc(buf.len);
+				if (buf.data == NULL) {
 					logerr(1, "malloc()");
-					exit(1);
+					exit(1); /* XXX */
 				}
 
 				requests_cli++;
-				clip->tv = tp;
-				ptr = clip->buf;
+				c->tv = tp;
+				c->ret++;
+				c->srv = find_srv(c);
 
 				/* Send request to DNS server */
+				send_udp(clisock, &c->buf, &c->srv->addr);
+				c->srv->send++;
 				requests_srv++;
-				clip->ret++;
-				srvp = find_srv(clip);
-				clip->srv = srvp;
-				clip->srv->send++;
-				send_udp(clisock, ptr, n, &srvp->sock);
 			} else {
 				/* Read answer from DNS server */
-				n = recv_udp(clisock, buf, BUF_SIZ, &srv1.sock, &id);
+				n = recv_udp(clisock, &buf, &addr, &id);
 				if (n <= 0)
 					continue;
 
-				clip = find_cli(id);
-				if (clip == NULL) {
+				c = find_cli(id);
+				if (c == NULL) {
 					logout(1, "Cannot find client (id: %05d)", id);
 					continue;
 				}
 
-				clip->srv->recv++;
+				buf.len = n;
+				c->srv = find_srv_by_addr(&addr);
+				if (c->srv != NULL) {
+					c->srv->recv++;
 
-				if (strncmp(clip->srv->name, "95.108.142.2", IP_LEN) == 0)
-					logout(1, "client #%03d (ret: %d); request id: %05d",
-					    clip->num, clip->ret, id);
+					if (strncmp(c->srv->name, "95.108.142.2", IP_LEN) == 0)
+						logout(1, "client #%03d (ret: %d); request id: %05d",
+						    c->num, c->ret, id);
+				} else
+					logout(1, "find_srv_by_addr() returns NULL");
 
 				/* Send answer to client */
-				send_udp(srvsock, buf, n, &clip->sock);
-				clip->inuse = 0;
-				free(clip->buf);
+				send_udp(srvsock, &buf, &c->addr);
+				free(c->buf.data);
+				c->inuse = 0;
 				active_clients--;
 			}
 		}
 
 		/* Find timeouted requests */
-		active = active_clients;
-		for (i = 0; i < clients; i++) {
-			if (cli[i].inuse == 1) {
-				clip = find_timeouted(tp);
-				if (clip == NULL)
-					continue;
-
-				logout(3, "client #%03d (id: %05d) timeouted", clip->num, clip->id);
-
-				clip->tv = tp;
-				ptr = clip->buf;
-
-				/* Send request to DNS server */
-				requests_srv++;
-				clip->ret++;
-				srvp = find_srv(clip);
-				clip->srv = srvp;
-				clip->srv->send++;
-
-				send_udp(clisock, ptr, n, &srvp->sock);
-
-				while (--active > 0) {
-					break;
-				}
+		while ((c = find_timeouted(tp)) != NULL) {
+			if (c->ret > 9) {
+				free(c->buf.data);
+				c->inuse = 0;
+				active_clients--;
+				max_tries_clients++;
+				logout(1, "reached max tries: client #%03d (ret: %d); request id: %05d",
+				    c->num, c->ret, id);
+				continue;
 			}
+
+			logout(3, "client #%03d (id: %05d) timeouted", c->num, c->id);
+
+			if (c->srv->weight > 1)
+				c->srv->weight--;
+
+			c->tv = tp;
+			c->ret++;
+			c->srv = find_srv(c);
+
+			/* Send request to DNS server */
+			send_udp(clisock, &c->buf, &c->srv->addr);
+			c->srv->send++;
+			requests_srv++;
 		}
 	}
 }
 
 static ssize_t
-recv_udp(int fd, void *buf, size_t len, sock_t *sock, int *id)
+recv_udp(int fd, buf_t *buf, addr_t *addr, int *id)
 {
 	ssize_t n;
 	short int dns_id;
-	struct sockaddr_in *from;
-	socklen_t *fromlen;
+	struct sockaddr_in *sin;
+	socklen_t *len;
 
-	from = &(sock->addr);
-	fromlen = &(sock->len);
+	sin = &(addr->sin);
+	len = &(addr->len);
 
 	do {
-		n = recvfrom(fd, buf, len, 0, (struct sockaddr *)from, fromlen);
+		n = recvfrom(fd, buf->data, buf->len, 0, (struct sockaddr *)sin, len);
 	} while (n == -1 && errno == EINTR);
 
 	if (n == -1) {
@@ -463,26 +468,26 @@ recv_udp(int fd, void *buf, size_t len, sock_t *sock, int *id)
 		return (n);
 	}
 
-	memcpy(&dns_id, buf, sizeof(short int));
+	memcpy(&dns_id, buf->data, sizeof(short int));
 	*id = ntohs(dns_id);
-	logout(3, "read %d bytes from %s (id: %05d)", n, inet_ntoa(from->sin_addr), *id);
+	logout(3, "read %d bytes from %s (id: %05d)", n, inet_ntoa(sin->sin_addr), *id);
 
 	return (n);
 }
 
 static ssize_t
-send_udp(int fd, const void *buf, size_t len, sock_t *sock)
+send_udp(int fd, buf_t *buf, addr_t *addr)
 {
 	ssize_t n;
 	short int dns_id;
-	struct sockaddr_in *to;
-	socklen_t tolen;
+	struct sockaddr_in *sin;
+	socklen_t *len;
 
-	to = &(sock->addr);
-	tolen = sock->len;
+	sin = &(addr->sin);
+	len = &(addr->len);
 
 	do {
-		n = sendto(fd, buf, len, 0, (const struct sockaddr *)to, tolen);
+		n = sendto(fd, buf->data, buf->len, 0, (const struct sockaddr *)sin, *len);
 	} while (n == -1 && errno == EINTR);
 
 	if (n == -1) {
@@ -490,22 +495,48 @@ send_udp(int fd, const void *buf, size_t len, sock_t *sock)
 		return (n);
 	}
 
-	memcpy(&dns_id, buf, sizeof(short int));
-	logout(3, "wrote %d bytes to %s (id: %05d)", n, inet_ntoa(to->sin_addr), ntohs(dns_id));
+	memcpy(&dns_id, buf->data, sizeof(short int));
+	logout(3, "wrote %d bytes to %s (id: %05d)", n, inet_ntoa(sin->sin_addr), ntohs(dns_id));
 
 	return (n);
 }
 
-static client_t *
-find_newcli(client_t *c)
+static server_t *
+find_srv(client_t *c)
+{
+	server_t *s;
+
+	s = srvs[(requests_srv - 1) % weight];
+	logout(3, "server #%02d found (id: %d, request: %d, weight: %d/%d)",
+	    s->id, c->id, requests_srv, s->conf_weight, weight);
+
+	return (s);
+}
+
+static server_t *
+find_srv_by_addr(addr_t *addr)
 {
 	int i;
-	client_t *clip;
 
-	clip = find_cli(c->id);
-	if (clip != NULL) {
-		logout(1, "duplicate id: %d", c->id);
-		return(clip);
+	for (i = 0; i < servers; i++) {
+		if (strncmp(inet_ntoa(addr->sin.sin_addr), srv[i].name, IP_LEN) == 0)
+			return (&srv[i]);
+	}
+
+	return (NULL);
+}
+
+static client_t *
+find_newcli(int id)
+{
+	int i;
+	client_t *c;
+
+	c = find_cli(id);
+	if (c != NULL) {
+		logout(1, "duplicate id: %d", id);
+		requests_dup++;
+		return (c);
 	}
 
 	for (i = 0; i < clients; i++) {
@@ -514,6 +545,8 @@ find_newcli(client_t *c)
 			cli[i].ret = 0;
 			cli[i].num = requests_cli;
 			active_clients++;
+			if (active_clients > max_active_clients)
+				max_active_clients = active_clients;
 			return (&cli[i]);
 		}
 	}
@@ -535,24 +568,45 @@ find_cli(int id)
 	return (NULL);
 }
 
-static server_t *
-find_srv(client_t *c)
-{
-	server_t *s;
-
-	s = srvs[(requests_srv - 1) % weight];
-	logout(3, "server #%02d found (id: %d, request: %d, weight: %d/%d)",
-	    s->id, c->id, requests_srv, s->conf_weight, weight);
-
-	return (s);
-}
-
-static int
-find_timeout(struct timeval tp)
+static client_t *
+find_timeouted(struct timeval tp)
 {
 	int i;
-	int to;
 	int active;
+
+	active = active_clients;
+
+	for (i = 0; i < clients; i++) {
+		if (cli[i].inuse == 1) {
+
+			logout(3, "client #%03d (id: %05d) timeouted: %d.%06ld",
+			    cli[i].num, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
+
+			if (tp.tv_sec > cli[i].tv.tv_sec) {
+				if (tp.tv_usec < cli[i].tv.tv_usec) {
+					if (1000000 + tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
+						return (&cli[i]);
+					}
+				}
+			} else if (tp.tv_sec == cli[i].tv.tv_sec && tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
+				return (&cli[i]);
+			}
+
+			while (--active > 0) {
+				break;
+			}
+		}
+	}
+
+	return (NULL);
+}
+
+static void
+find_timeout(struct timeval tp, struct timespec *timeout)
+{
+	int i;
+	int active;
+	suseconds_t to;
 	struct timeval diff;
 	struct timeval diff1;
 
@@ -598,40 +652,8 @@ find_timeout(struct timeval tp)
 
 	logout(3, "timeout set: 0.%06d", to);
 
-	return (to);
-}
-
-static client_t *
-find_timeouted(struct timeval tp)
-{
-	int i;
-	int active;
-
-	active = active_clients;
-
-	for (i = 0; i < clients; i++) {
-		if (cli[i].inuse == 1) {
-
-			logout(3, "client #%03d (id: %05d) timeouted: %d.%06ld",
-			    cli[i].num, cli[i].id, cli[i].tv.tv_sec, cli[i].tv.tv_usec);
-
-			if (tp.tv_sec > cli[i].tv.tv_sec) {
-				if (tp.tv_usec < cli[i].tv.tv_usec) {
-					if (1000000 + tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
-						return (&cli[i]);
-					}
-				}
-			} else if (tp.tv_sec == cli[i].tv.tv_sec && tp.tv_usec > cli[i].tv.tv_usec + TIMEOUT) {
-				return (&cli[i]);
-			}
-
-			while (--active > 0) {
-				break;
-			}
-		}
-	}
-
-	return (NULL);
+	timeout->tv_sec = 0;
+	timeout->tv_nsec = to * 1000;
 }
 
 static void
@@ -649,13 +671,34 @@ make_stat(void)
 	fprintf(fh,
 	    "Requests from clients:  %lu\n"
 	    "Requests to servers:    %lu\n"
-	    "Active clients:         %d\n",
+	    "Requests duplicated:    %lu\n"
+	    "Active clients:         %d\n"
+	    "Max active clients:     %d\n"
+	    "Max tries clients:      %d\n",
 	    requests_cli,
 	    requests_srv,
-	    active_clients);
+	    requests_dup,
+	    active_clients,
+	    max_active_clients,
+	    max_tries_clients);
 
 	for (i = 0; i < servers; i++)
-		fprintf(fh, "%s: send %zu; recv %zu\n", srv[i].name, srv[i].send, srv[i].recv);
+		fprintf(fh, "%s: send %zu, recv %zu, weight: %d\n", srv[i].name, srv[i].send, srv[i].recv, srv[i].weight);
 
 	fclose(fh);
+}
+
+static void
+cleanup(void)
+{
+	int i;
+
+	for (i = 0; i < clients; i++)
+		if (cli[i].inuse == 1)
+			free(cli[i].buf.data);
+
+	free(cli);
+	free(srvs);
+	free(srv);
+	exit(0);
 }

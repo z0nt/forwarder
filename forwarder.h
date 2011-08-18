@@ -36,12 +36,12 @@
 
 #define nonblock_socket(s) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK)
 
-struct sock_s {
-	struct sockaddr_in addr;
+struct addr_s {
+	struct sockaddr_in sin;
 	socklen_t len;
 };
 
-typedef struct sock_s sock_t;
+typedef struct addr_s addr_t;
 
 struct server_s {
 	unsigned short port;
@@ -50,11 +50,18 @@ struct server_s {
 	int id;
 	size_t send;
 	size_t recv;
-	sock_t sock;
+	addr_t addr;
 	char name[IP_LEN];
 };
 
 typedef struct server_s server_t;
+
+struct buf_s {
+	void *data;
+	ssize_t len;
+};
+
+typedef struct buf_s buf_t;	
 
 struct client_s {
 	int id;
@@ -63,8 +70,8 @@ struct client_s {
 	int inuse;
 	server_t *srv;
 	struct timeval tv;
-	sock_t sock;
-	char *buf;
+	addr_t addr;
+	buf_t buf;
 };
 
 typedef struct client_s client_t;
