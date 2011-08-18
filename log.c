@@ -40,7 +40,8 @@
 
 #include "log.h"
 
-static void _log(const int print_errno, const int level, const char *fmt, va_list ap);
+static void log_to_syslog(const int print_errno, const int level, const char *fmt, va_list ap);
+static void log_to_file(const int print_errno, const int level, const char *fmt, va_list ap);
 
 void
 loginit(const char *logfile)
@@ -63,7 +64,10 @@ logout(const int level, const char *fmt, ...)
 	va_list ap;
 
 	va_start(ap, fmt);
-	_log(0, level, fmt, ap);
+	if (syslog_flag)
+		log_to_syslog(0, level, fmt, ap);
+	else
+		log_to_file(0, level, fmt, ap);
 	va_end(ap);
 }
 
@@ -73,12 +77,50 @@ logerr(const int level, const char *fmt, ...)
 	va_list ap;
 
 	va_start(ap, fmt);
-	_log(1, level, fmt, ap);
+	if (syslog_flag)
+		log_to_syslog(1, level, fmt, ap);
+	else
+		log_to_file(1, level, fmt, ap);
 	va_end(ap);
+
 }
 
 static void
-_log(const int print_errno, const int level, const char *fmt, va_list ap)
+log_to_syslog(const int print_errno, const int level, const char *fmt, va_list ap)
+{
+	int n, avail;
+	char buf[PIPE_BUF], *bufp;
+
+	avail = PIPE_BUF;
+	bufp = buf;
+
+	if (level > debug_level)
+		return;
+
+	n = vsnprintf(bufp, avail, fmt, ap);
+	bufp += n;
+	avail -= n;
+
+	if (print_errno)
+		snprintf(bufp, avail, " (%d: %%m)", errno);
+
+	switch(level) {
+	case 1:
+		syslog(LOG_ERR, buf);
+		break;
+	case 2:
+		syslog(LOG_WARNING, buf);
+		break;
+	case 3:
+		syslog(LOG_DEBUG, buf);
+		break;
+	default:
+		break;
+	}
+}
+
+static void
+log_to_file(const int print_errno, const int level, const char *fmt, va_list ap)
 {
 	int n, avail;
 	char *nlevel;
@@ -93,31 +135,6 @@ _log(const int print_errno, const int level, const char *fmt, va_list ap)
 
 	if (level > debug_level)
 		return;
-
-	if (syslog_flag) {
-		n = vsnprintf(bufp, avail, fmt, ap);
-		bufp += n;
-		avail -= n;
-
-		if (print_errno)
-			snprintf(bufp, avail, " (%d: %%m)", errno);
-
-		switch(level) {
-		case 1:
-			syslog(LOG_ERR, buf);
-			break;
-		case 2:
-			syslog(LOG_WARNING, buf);
-			break;
-		case 3:
-			syslog(LOG_DEBUG, buf);
-			break;
-		default:
-			break;
-		}
-
-		return;
-	}
 
 	gettimeofday(&tv, (struct timezone *)NULL);
 	tv_time = tv.tv_sec;

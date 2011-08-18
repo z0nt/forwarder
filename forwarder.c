@@ -519,10 +519,9 @@ find_srv_by_addr(addr_t *addr)
 {
 	server_t *s;
 
-	STAILQ_FOREACH(s, &srvq, next) {
+	STAILQ_FOREACH(s, &srvq, next)
 		if (strncmp(inet_ntoa(addr->sin.sin_addr), s->name, IP_LEN) == 0)
 			return (s);
-	}
 
 	return (NULL);
 }
