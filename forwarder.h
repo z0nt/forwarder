@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2010 Andrey Zonov <andrey@zonov.org>
+/*_
+ * Copyright (c) 2010, 2011 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -79,10 +79,21 @@ struct client_s {
 	struct timeval tv;
 	addr_t addr;
 	buf_t buf;
+	struct clientq_s *cq;
 };
 
 typedef struct client_s client_t;
 
+struct clientq_s {
+	client_t *cli;
+	STAILQ_ENTRY(clientq_s) next;
+};
+STAILQ_HEAD(, clientq_s) cliq;
+
+typedef struct clientq_s clientq_t;
+
 int servers;
+int max_retries;
+struct timeval timeout;
 
 #endif
