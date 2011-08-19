@@ -31,9 +31,10 @@
 /*#define HOST	INADDR_ANY*/
 #define HOST	"127.0.0.2"
 #define PORT	53
-#define BUF_SIZ	512	/* max packet size */
-#define TIMEOUT	500000	/* microseconds */
-#define CLIENTS	1024	/* default clients number */
+#define TIMEOUT	500	/* milliseconds */
+
+#define NS_MAXID	(1<<16)	/* maximum query ID */
+#define NS_PACKETSZ	512	/* NS_PACKETSZ from <arpa/nameser.h> (default UDP packet size) */
 
 #define IP_LEN		sizeof("255.255.255.255")
 #define PORT_LEN	sizeof("65535")

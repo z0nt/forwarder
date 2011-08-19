@@ -53,7 +53,7 @@ static int clisock;
 static int active_clients;
 static int max_active_clients;
 static int max_tries_clients;
-static int clients;
+static int ns_ids;
 static client_t *cli;
 static unsigned long requests_cli;
 static unsigned long requests_srv;
@@ -95,7 +95,9 @@ main(int argc, char **argv)
 	daemonize_flag = 1;
 	config = "forwarder.conf";
 	stat_file = NULL;
+
 	/* XXX */
+	ns_ids = NS_MAXID;
 	max_retries = 9;
 	timeout.tv_sec = 0;
 	timeout.tv_usec = TIMEOUT;
@@ -200,12 +202,11 @@ cli_init(void)
 {
 	int i;
 
-	clients = CLIENTS;
-	cli = malloc(sizeof(client_t) * clients);
+	cli = malloc(sizeof(client_t) * ns_ids);
 	if (cli == NULL)
 		err(1, "malloc()");
 
-	for (i = 0; i < clients; i++) {
+	for (i = 0; i < ns_ids; i++) {
 		cli[i].inuse = 0;
 		bzero(&cli[i].addr.sin, sizeof(struct sockaddr_in));
 		cli[i].addr.len = sizeof(struct sockaddr_in);
@@ -314,7 +315,7 @@ mainloop(void)
 		exit(1);
 	}
 
-	buf.len = BUF_SIZ;
+	buf.len = NS_PACKETSZ;
 	buf.data = malloc(buf.len);
 	if (buf.data == NULL) {
 		logerr(1, "malloc()");
@@ -363,7 +364,7 @@ mainloop(void)
 			logout(3, "kevent() timeouted");
 
 		for (i = 0; i < k; i++) {
-			buf.len = BUF_SIZ; /* XXX */
+			buf.len = NS_PACKETSZ; /* XXX */
 			if (ev[i].ident == srvsock) {
 				/* Read request from client */
 				n = recv_udp(srvsock, &buf, &addr, &id);
@@ -371,10 +372,8 @@ mainloop(void)
 					continue;
 
 				c = find_newcli(id);
-				if (c == NULL) {
-					logout(1, "Max clients reached");
+				if (c == NULL)
 					continue;
-				}
 
 				memcpy(&c->addr, &addr, sizeof(addr_t));
 				c->id = id;
@@ -413,19 +412,15 @@ mainloop(void)
 
 				c = find_cli(id);
 				if (c == NULL) {
-					logout(1, "Cannot find client (id: %05d)", id);
+					logout(2, "Cannot find client (id: %05d)", id);
 					continue;
 				}
 
 				buf.len = n;
 				c->srv = find_srv_by_addr(&addr);
-				if (c->srv != NULL) {
+				if (c->srv != NULL)
 					c->srv->recv++;
-
-					if (strncmp(c->srv->name, "95.108.142.2", IP_LEN) == 0)
-						logout(1, "client #%03d (ret: %d); request id: %05d",
-						    c->num, c->ret, id);
-				} else
+				else
 					logout(1, "find_srv_by_addr() returns NULL");
 
 				/* Send answer to client */
@@ -446,7 +441,7 @@ mainloop(void)
 				c->inuse = 0;
 				active_clients--;
 				max_tries_clients++;
-				logout(1, "reached max tries: client #%03d (ret: %d); request id: %05d",
+				logout(2, "reached max tries: client #%03d (ret: %d); request id: %05d",
 				    c->num, c->ret, id);
 				continue;
 			}
@@ -557,13 +552,13 @@ find_srv_by_addr(addr_t *addr)
 static client_t *
 find_cli(int id)
 {
-	int i;
-
-	for (i = 0; i < clients; i++) {
-		if (cli[i].inuse == 1 && cli[i].id == id) {
-			return (&cli[i]);
-		}
+	if (id < 0 || id > (ns_ids - 1)) {
+		logout(1, "Wrong request id: %d", id);
+		return (NULL);
 	}
+
+	if (cli[id].inuse == 1)
+		return (&cli[id]);
 
 	return (NULL);
 }
@@ -571,31 +566,32 @@ find_cli(int id)
 static client_t *
 find_newcli(int id)
 {
-	int i;
 	client_t *c;
+
+	if (id < 0 || id > (ns_ids - 1)) {
+		logout(1, "Wrong request id: %d", id);
+		return (NULL);
+	}
 
 	c = find_cli(id);
 	if (c != NULL) {
 		logout(1, "duplicate id: %d", id);
+		free(c->buf.data);
 		STAILQ_REMOVE(&cliq, c->cq, clientq_s, next);
 		free(c->cq);
 		requests_dup++;
 		return (c);
 	}
 
-	for (i = 0; i < clients; i++) {
-		if (cli[i].inuse == 0) {
-			cli[i].inuse = 1;
-			cli[i].ret = 0;
-			cli[i].num = requests_cli;
-			active_clients++;
-			if (active_clients > max_active_clients)
-				max_active_clients = active_clients;
-			return (&cli[i]);
-		}
-	}
+	cli[id].inuse = 1;
+	cli[id].ret = 0;
+	cli[id].num = requests_cli;
 
-	return (NULL);
+	active_clients++;
+	if (active_clients > max_active_clients)
+		max_active_clients = active_clients;
+
+	return (&cli[id]);
 }
 
 static client_t *
