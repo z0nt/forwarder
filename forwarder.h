@@ -31,14 +31,11 @@
 /*#define HOST	INADDR_ANY*/
 #define HOST	"127.0.0.2"
 #define PORT	53
-#define TIMEOUT	500	/* milliseconds */
 
+#define TIMEOUT		0.5	/* seconds */
+#define ATTEMPTS	8	/* max tries */
 #define NS_MAXID	(1<<16)	/* maximum query ID */
-#define NS_PACKETSZ	512	/* NS_PACKETSZ from <arpa/nameser.h> (default UDP packet size) */
-
-#define IP_LEN		sizeof("255.255.255.255")
-#define PORT_LEN	sizeof("65535")
-#define WEIGHT_LEN	sizeof("65535")
+#define NS_PACKETSZ	512	/* default UDP packet size from <arpa/nameser.h> */
 
 #define nonblock_socket(s) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK)
 
@@ -49,6 +46,13 @@ struct addr_s {
 
 typedef struct addr_s addr_t;
 
+struct buf_s {
+	void *data;
+	ssize_t len;
+};
+
+typedef struct buf_s buf_t;
+
 struct server_s {
 	unsigned short port;
 	unsigned short conf_weight;
@@ -57,19 +61,12 @@ struct server_s {
 	size_t send;
 	size_t recv;
 	addr_t addr;
-	char name[IP_LEN];
+	char name[INET_ADDRSTRLEN];
 	STAILQ_ENTRY(server_s) next;
 };
 STAILQ_HEAD(, server_s) srvq;
 
 typedef struct server_s server_t;
-
-struct buf_s {
-	void *data;
-	ssize_t len;
-};
-
-typedef struct buf_s buf_t;	
 
 struct client_s {
 	int id;
@@ -94,7 +91,7 @@ STAILQ_HEAD(, clientq_s) cliq;
 typedef struct clientq_s clientq_t;
 
 int servers;
-int max_retries;
+int attempts;
 struct timeval timeout;
 
 #endif

@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2010 Andrey Zonov <andrey@zonov.org>
+/*_
+ * Copyright (c) 2010, 2011 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,6 +29,12 @@
 #define MIN_DEBUG_LEVEL	0	/* quiet */
 #define MAX_DEBUG_LEVEL	3	/* debug */
 
+#define EXIT	-1
+#define LERR	1
+#define LWARN	2
+#define LDEBUG	3
+
+int print_time_and_level;
 int debug_level;
 int syslog_flag;
 int logfd;

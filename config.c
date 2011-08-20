@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2010 Andrey Zonov <andrey@zonov.org>
+/*_
+ * Copyright (c) 2010, 2011 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -23,14 +23,12 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <sys/param.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
 #include <ctype.h>
-#include <err.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,188 +36,241 @@
 
 #include "config.h"
 #include "forwarder.h"
+#include "log.h"
 
-#define MAX_LINE_LEN LINE_MAX
+#define skip_blanks(a)		while (isblank(*a)) { a++; }
+#define skip_comments(a)	if (isspace(*a) || *a == '\0' || *a == '#') { continue; }
+#define check_and_skip_blanks(a)	if (!isblank(*a)) {			\
+						config_err(buf, a, line);	\
+					} else {				\
+						 skip_blanks(a);		\
+					}
+#define check_and_skip_comments(a)	if (*a == '#' && !isspace(*(a - 1))) {			\
+						config_err(buf, a, line);			\
+					} else if (!isspace(*a) && *a != '\0' && *a != '#') {	\
+						config_err(buf, a, line);			\
+					}
 
-static void config_err(const char *buf, int line, size_t len);
+static void config_err(const char *buf, const char *str, int line);
+static void strtoipv4(const char *str, char **endp, char *ip);
+static void float2timer(float f, struct timeval *tv);
 
 void
 config_init(const char *path)
 {
 	int i;
-	int id;
+	int line;
+	int srv_id;
 	int port;
 	int weight;
-	int line;
-	size_t len;
-	size_t len1;
+	int options_parsed;
+	int timeout_parsed;
+	int attempts_parsed;
 	FILE *config;
-	char buf[MAX_LINE_LEN];
-	char ip[IP_LEN];
-	char strport[PORT_LEN];
-	char strweight[WEIGHT_LEN];
-	char *p;
+	char buf[LINE_MAX];
+	char *str;
+	char *endp;
 	server_t *s;
+	float to;
 
 	config = fopen(path, "r");
 	if (config == NULL)
-		err(1, "Cannot open config file: %s", path);
+		logerr(EXIT, "Cannot open config file: %s", path);
 
-	id = 0;
 	line = 0;
+	srv_id = 0;
+
+	options_parsed = 0;
+	timeout_parsed = 0;
+	attempts_parsed = 0;
+
+	/* Init global variables */
+	float2timer(TIMEOUT, &timeout);
+	attempts = ATTEMPTS;
 	servers = 0;
 	STAILQ_INIT(&srvq);
-	while ((p = fgets(buf, MAX_LINE_LEN, config)) != NULL) {
+
+	while ((str = fgets(buf, sizeof(buf), config)) != NULL) {
 		line++;
-		len1 = strlen(buf);
-		len = len1;
 
-		if (len == 0)
-			continue;
+		/* skip blanks and comments */
+		skip_blanks(str);
+		skip_comments(str);
 
-		while (len > 0) {
+		/* nameserver */
+		if (strncmp(str, "nameserver", sizeof("nameserver") - 1) == 0) {
+			str += sizeof("nameserver") - 1;
 
-			if (*p == '\n' || *p == '\r' || *p == '\0' || *p == '#')
-				break;
+			servers++;
+			s = malloc(sizeof(server_t));
+			if (s == NULL)
+				logerr(EXIT, "malloc()");
+			/* Default values */
+			s->port = PORT;
+			s->conf_weight = 1;
 
-			while (*p == ' ' || *p == '\t') {
-				len--;
-				p++;
-				continue;
+			/* check and skip blanks */
+			check_and_skip_blanks(str);
+
+			/* IP address */
+			strtoipv4(str, &endp, s->name);
+			if (endp == str || (*endp != ':' && !isspace(*endp)))
+				config_err(buf, str, line);
+			str = endp;
+
+			/* port number */
+			if (*str == ':') {
+				str++;
+
+				port = strtol(str, &endp, 10);
+				if (endp == str)
+					config_err(buf, str, line);
+				if (port < 1 || port > 65535)
+					logout(EXIT, "Port must be between 1..65535");
+				str = endp;
+				s->port = port;
 			}
 
-			/* nameserver */
-			if (!strncmp(p, "nameserver", sizeof("nameserver") - 1) &&
-			    (p[sizeof("nameserver") - 1] == ' ' ||
-			     p[sizeof("nameserver") - 1] == '\t')) {
-				len -= sizeof("nameserver") - 1;
-				p += sizeof("nameserver") - 1;
-				servers++;
-				s = malloc(sizeof(server_t));
-				if (s == NULL)
-					err(1, "malloc()");
+			/* check and skip blanks and comments */
+			check_and_skip_blanks(str);
+			skip_comments(str);
 
-				if (len <= 0)
-					config_err(buf, line, len1 - len);
+			/* weight */
+			if (strncmp(str, "weight", sizeof("weight") - 1) == 0) {
+				str += sizeof("weight") - 1;
 
-				while (*p == ' ' || *p == '\t') {
-					len--;
-					p++;
-				}
+				/* check and skip blanks */
+				check_and_skip_blanks(str);
 
-				/* IP address */
-				ip[0] = '\0';
-				for (i = 0; i < IP_LEN && len > 0 && (isdigit(*p) || *p == '.' || *p == ':'); i++) {
-					if (*p == ':') {
-						len--;
-						p++;
-						break;
-					} else {
-						ip[i] = *p;
-						ip[i + 1] = '\0';
-						len--;
-						p++;
-					}
-				}
-
-				if (ip[0] == '\0')
-					config_err(buf, line, len1 - len);
-
-				if (inet_addr(ip) == -1)
-					config_err(buf, line, len1 - len);
-	
-				/* port number */
-				strport[0] = '\0';
-				for (i = 0; i < PORT_LEN && len > 0 && isdigit(*p); i++) {
-					strport[i] = *p;
-					strport[i + 1] = '\0';
-					len--;
-					p++;
-				}
-
-				/* skip spaces and commentaries */
-				if (!(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0'))
-					config_err(buf, line, len1 - len);
-
-				while (*p == ' ' || *p == '\t') {
-					len--;
-					p++;
-				}
-
-				/* weight */
-				if (!strncmp(p, "weight", sizeof("weight") - 1) &&
-				    (p[sizeof("weight") - 1] == ' ' ||
-				     p[sizeof("weight") - 1] == '\t')) {
-					len -= sizeof("weight") - 1;
-					p += sizeof("weight") - 1;
-
-					if (len <= 0)
-						config_err(buf, line, len1 - len);
-
-					while (*p == ' ' || *p == '\t') {
-						len--;
-						p++;
-					}
-
-					strweight[0] = '\0';
-					for (i = 0; i < WEIGHT_LEN && len > 0 && isdigit(*p); i++) {
-						strweight[i] = *p;
-						strweight[i + 1] = '\0';
-						len--;
-						p++;
-					}
-				}
-
-				/* skip spaces and commentaries */
-				if (!(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0'))
-					config_err(buf, line, len1 - len);
-
-				while (*p == ' ' || *p == '\t') {
-					len--;
-					p++;
-				}
-
-				if (!(*p == '\n' || *p == '\r' || *p == '\0' || *p == '#'))
-					config_err(buf, line, len1 - len);
-
-				/* save parsed data */
-				port = atoi(strport);
-				if (port < 0 || port > 65535)
-					config_err(buf, line, len1 - len);
-				else if (port == 0)
-					port = PORT;
-
-				s->port = port;
-
-				strncpy(s->name, ip, IP_LEN);
-				s->name[IP_LEN] = '\0';
-
-				weight = atoi(strweight);
-				if (weight < 0 || weight > 65535)
-					config_err(buf, line, len1 - len);
-				else if (weight == 0) {
-					/* XXX */
-					weight = 1;
-				}
-
+				weight = strtol(str, &endp, 10);
+				if (endp == str)
+					config_err(buf, str, line);
+				if (weight <= 0)
+					logout(EXIT, "Weight must be positive");
+				str = endp;
 				s->conf_weight = weight;
-				s->id = id;
-				id++;
-				STAILQ_INSERT_TAIL(&srvq, s, next);
-			} else
-				config_err(buf, line, len1 - len);
-		}
+			}
+
+			/* skip blanks and comments */
+			skip_blanks(str);
+			check_and_skip_comments(str);
+
+			s->id = srv_id;
+			STAILQ_INSERT_TAIL(&srvq, s, next);
+
+			srv_id++;
+
+		/* options */
+		} else if (strncmp(str, "options", sizeof("options") - 1) == 0) {
+			str += sizeof("options") - 1;
+			if (options_parsed)
+				logout(EXIT, "Only one options line must be used");
+			options_parsed = 1;
+
+			for (i = 0; i < 2; i++) {
+				/* check and skip blanks */
+				check_and_skip_blanks(str);
+				
+				/* timeout */
+				if (strncmp(str, "timeout:", sizeof("timeout:") - 1) == 0) {
+					str += sizeof("timeout:") - 1;
+					if (timeout_parsed)
+						logout(EXIT, "Option timeout is already declared");
+					timeout_parsed = 1;
+
+					to = strtof(str, &endp);
+					if (endp == str)
+						config_err(buf, str, line);
+					if (to <= 0)
+						logout(EXIT, "Timeout must be positive");
+					str = endp;
+					float2timer(to, &timeout);
+
+				/* attempts */
+				} else if (strncmp(str, "attempts:", sizeof("attempts:") - 1) == 0) {
+					str += sizeof("attempts:") - 1;
+					if (attempts_parsed)
+						logout(EXIT, "Option attempts is already declared");
+					attempts_parsed = 1;
+
+					attempts = strtol(str, &endp, 10);
+					if (endp == str)
+						config_err(buf, str, line);
+					if (attempts <= 0)
+						logout(EXIT, "Number of attempts must be positive");
+					str = endp;
+				}
+			}
+
+			if (timeout_parsed == 0 && attempts_parsed == 0)
+				logout(EXIT, "You must declare at least one option");
+
+			/* skip blanks and comments */
+			skip_blanks(str);
+			check_and_skip_comments(str);
+		} else
+			config_err(buf, str, line);
 	}
+
+	if (servers == 0)
+		logout(EXIT, "You must specify at least one server");
 }
 
 static void
-config_err(const char *buf, int line, size_t len)
+config_err(const char *buf, const char *str, int line)
 {
-	fprintf(stderr,
-	    "Parsing error: %d:%ld\n"
+	int pos;
+	int len;
+	char *s;
+
+	pos = 0;
+	len = strlen(str);
+	s = (char *) buf;
+
+	while (*s != '\0') {
+		if (strncmp(s, str, len) == 0)
+			break;
+		if (*s == '\t')
+			pos = pos - (pos % 8) + 8;
+		else
+			pos++;
+		s++;
+	}
+
+	logout(EXIT,
+	    "Error parsing config at line:%d, position: %d\n"
 	    "%s"
 	    "%*s^",
-	    line, len, buf, (int)(len - 1), " ");
+	    line, pos, buf, pos, " ");
+}
 
-	exit(1);
+static void
+strtoipv4(const char *str, char **endp, char *ip)
+{
+	int i;
+	const char *s;
+	struct in_addr addr;
+
+	s = str;
+	for (i = 0; i < INET_ADDRSTRLEN; i++) {
+		if (isdigit(*s) || *s == '.') {
+			ip[i] = *s;
+			s++;
+		} else {
+			ip[i] = '\0';
+			break;
+		}
+	}
+
+	*endp = (char *) str;
+	if (inet_aton(ip, &addr))
+		*endp = (char *) s;
+}
+
+static void
+float2timer(float f, struct timeval *tv)
+{
+	tv->tv_sec = f;
+	f -= tv->tv_sec;
+	tv->tv_usec = f * 1000000;
 }

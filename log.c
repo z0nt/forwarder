@@ -1,4 +1,4 @@
-/*
+/*_
  * Copyright (c) 2010, 2011 Andrey Zonov <andrey@zonov.org>
  * All rights reserved.
  *
@@ -27,7 +27,6 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 
-#include <err.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -46,16 +45,21 @@ static void log_to_file(const int print_errno, const int level, const char *fmt,
 void
 loginit(const char *logfile)
 {
-        if (debug_level == MIN_DEBUG_LEVEL)
-                return;
+	int fd;
 
-        if (syslog_flag)
-                openlog(getprogname(), LOG_CONS | LOG_PID, LOG_DAEMON);
-        else {
-                logfd = open(logfile, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-                if (logfd == -1)
-                        err(1, "Cannot open logfile: %s", logfile);
-        }
+	if (debug_level == MIN_DEBUG_LEVEL)
+		return;
+
+	if (syslog_flag)
+		openlog(getprogname(), LOG_CONS | LOG_PID, LOG_DAEMON);
+	else {
+		fd = open(logfile, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+		if (fd == -1)
+			logerr(EXIT, "Cannot open logfile: %s", logfile);
+
+		logfd = fd;
+		print_time_and_level = 1;
+	}
 }
 
 void
@@ -69,6 +73,9 @@ logout(const int level, const char *fmt, ...)
 	else
 		log_to_file(0, level, fmt, ap);
 	va_end(ap);
+
+	if (level == EXIT)
+		exit(1);
 }
 
 void
@@ -83,6 +90,8 @@ logerr(const int level, const char *fmt, ...)
 		log_to_file(1, level, fmt, ap);
 	va_end(ap);
 
+	if (level == EXIT)
+		exit(1);
 }
 
 static void
@@ -105,16 +114,15 @@ log_to_syslog(const int print_errno, const int level, const char *fmt, va_list a
 		snprintf(bufp, avail, " (%d: %%m)", errno);
 
 	switch(level) {
-	case 1:
+	case EXIT:
+	case LERR:
 		syslog(LOG_ERR, buf);
 		break;
-	case 2:
+	case LWARN:
 		syslog(LOG_WARNING, buf);
 		break;
-	case 3:
+	case LDEBUG:
 		syslog(LOG_DEBUG, buf);
-		break;
-	default:
 		break;
 	}
 }
@@ -143,24 +151,25 @@ log_to_file(const int print_errno, const int level, const char *fmt, va_list ap)
 	lt->tm_year += 1900;
 	usec = tv.tv_usec;
 
-	switch(level) {
-		case 1:
-			nlevel = "error";
-			break;
-		case 2:
-			nlevel = "warn";
-			break;
-		case 3:
-			nlevel = "debug";
-			break;
-		default:
-			break;
-	}
+	if (print_time_and_level) {
+		switch(level) {
+			case EXIT:
+			case LERR:
+				nlevel = "error";
+				break;
+			case LWARN:
+				nlevel = "warn";
+				break;
+			case LDEBUG:
+				nlevel = "debug";
+				break;
+		}
 
-	n = snprintf(bufp, avail, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ",
-	    lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
-	bufp += n;
-	avail -= n;
+		n = snprintf(bufp, avail, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ",
+		    lt->tm_mday, lt->tm_mon, lt->tm_year, lt->tm_hour, lt->tm_min, lt->tm_sec, usec, nlevel);
+		bufp += n;
+		avail -= n;
+	}
 
 	n = vsnprintf(bufp, avail, fmt, ap);
 	bufp += n;

@@ -32,7 +32,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include <err.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -52,15 +51,15 @@ static int srvsock;
 static int clisock;
 static int active_clients;
 static int max_active_clients;
-static int max_tries_clients;
 static int ns_ids;
 static client_t *cli;
 static unsigned long requests_cli;
 static unsigned long requests_srv;
-static unsigned long requests_dup;
+static unsigned long duplicated_requests;
+static unsigned long timeouted_requests;
 static unsigned int weight;
 static server_t **srvs;
-static volatile sig_atomic_t sig_flag = 0;
+static volatile sig_atomic_t sig_flag;
 
 static void usage(void);
 static void srv_init(void);
@@ -89,6 +88,8 @@ main(int argc, char **argv)
 	char *logfile;
 	int daemonize_flag;
 
+	print_time_and_level = 0;
+	logfd = STDERR_FILENO;
 	debug_level = 3;
 	syslog_flag = 0;
 	logfile = "forwarder.log";
@@ -98,9 +99,6 @@ main(int argc, char **argv)
 
 	/* XXX */
 	ns_ids = NS_MAXID;
-	max_retries = 9;
-	timeout.tv_sec = 0;
-	timeout.tv_usec = TIMEOUT;
 
 	while ((ch = getopt(argc, argv, "c:d:l:ns:")) != -1) {
 		switch (ch) {
@@ -110,11 +108,11 @@ main(int argc, char **argv)
 		case 'd':
 			debug_level = strtol(optarg, &endptr, 10);
 			if (*optarg == '\0' || *endptr != '\0') {
-				fprintf(stderr, "Invalid debug level: %s\n", optarg);
+				logout(LERR, "Invalid debug level: %s", optarg);
 				usage();
 			}
 			if (debug_level < MIN_DEBUG_LEVEL || debug_level > MAX_DEBUG_LEVEL) {
-				fprintf(stderr, "Debug level must be %d..%d\n", MIN_DEBUG_LEVEL, MAX_DEBUG_LEVEL);
+				logout(LERR, "Debug level must be %d..%d", MIN_DEBUG_LEVEL, MAX_DEBUG_LEVEL);
 				usage();
 			}
 
@@ -146,7 +144,7 @@ main(int argc, char **argv)
 	loginit(logfile);
 	if (daemonize_flag)
 		if (daemon(0, 0) == -1)
-			err(1, "Cannot daemonize");
+			logerr(EXIT, "Cannot daemonize");
 	sig_init();
 	mainloop();
 
@@ -156,9 +154,8 @@ main(int argc, char **argv)
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-c config file] [-d debug level] [-l logfile] [-n] [-s stat file]\n",
+	logout(EXIT, "usage: %s [-c config file] [-d debug level] [-l logfile] [-n] [-s stat file]",
 	    getprogname());
-	exit(1);
 }
 
 static void
@@ -173,9 +170,8 @@ srv_init(void)
 		s->addr.len = sizeof(struct sockaddr_in);
 		s->addr.sin.sin_family = PF_INET;
 		s->addr.sin.sin_port = htons(s->port);
-		s->addr.sin.sin_addr.s_addr = inet_addr(s->name);
-		if (s->addr.sin.sin_addr.s_addr == INADDR_NONE)
-			err(1, "inet_addr()");
+		if (inet_aton(s->name, &s->addr.sin.sin_addr) == 0)
+			logerr(EXIT, "inet_aton()");
 	}
 
 	weight = 0;
@@ -186,7 +182,7 @@ srv_init(void)
 
 	srvs = malloc(sizeof(server_t *) * weight);
 	if (srvs == NULL)
-		err(1, "malloc()");
+		logerr(EXIT, "malloc()");
 
 	n = 0;
 	STAILQ_FOREACH(s, &srvq, next) {
@@ -204,7 +200,7 @@ cli_init(void)
 
 	cli = malloc(sizeof(client_t) * ns_ids);
 	if (cli == NULL)
-		err(1, "malloc()");
+		logerr(EXIT, "malloc()");
 
 	for (i = 0; i < ns_ids; i++) {
 		cli[i].inuse = 0;
@@ -222,25 +218,24 @@ sock_init(void)
 	/* Listen socket */
 	srvsock = socket(PF_INET, SOCK_DGRAM, 0);
 	if (srvsock == -1)
-		err(1, "socket()");
+		logerr(EXIT, "socket()");
 
 	nonblock_socket(srvsock);
 
 	bzero(&servaddr, sizeof(struct sockaddr_in));
 	servaddr.sin_family = PF_INET;
 	servaddr.sin_port = htons(PORT);
-	servaddr.sin_addr.s_addr = inet_addr(HOST);
-	if (servaddr.sin_addr.s_addr == -1)
-		err(1, "inet_addr()");
+	if (inet_aton(HOST, &servaddr.sin_addr) == 0)
+		logerr(EXIT, "inet_aton()");
 
 	rc = bind(srvsock, (const struct sockaddr *)&servaddr, sizeof(struct sockaddr_in));
 	if (rc == -1)
-		err(1, "bind()");
+		logerr(EXIT, "bind()");
 
 	/* Client socket */
 	clisock = socket(PF_INET, SOCK_DGRAM, 0);
 	if (clisock == -1)
-		err(1, "socket()");
+		logerr(EXIT, "socket()");
 
 	nonblock_socket(clisock);
 }
@@ -262,6 +257,8 @@ sig_init(void)
 	sigaction(SIGTERM, &act, 0);
 	sigaction(SIGINT, &act, 0);
 	sigaction(SIGINFO, &act, 0);
+
+	sig_flag = 0;
 }
 
 static void
@@ -298,29 +295,21 @@ mainloop(void)
 	addr.len = sizeof(struct sockaddr_in);
 
 	ch = calloc(1, sizeof(struct kevent) * 2);
-	if (ch == NULL) {
-		logerr(1, "calloc()");
-		exit(1);
-	}
+	if (ch == NULL)
+		logerr(EXIT, "calloc()");
 
 	ev = calloc(1, sizeof(struct kevent) * 2);
-	if (ev == NULL) {
-		logerr(1, "calloc()");
-		exit(1);
-	}
+	if (ev == NULL)
+		logerr(EXIT, "calloc()");
 
 	kq = kqueue();
-	if (kq == -1) {
-		logerr(1, "kqueue()");
-		exit(1);
-	}
+	if (kq == -1)
+		logerr(EXIT, "kqueue()");
 
 	buf.len = NS_PACKETSZ;
 	buf.data = malloc(buf.len);
-	if (buf.data == NULL) {
-		logerr(1, "malloc()");
-		exit(1);
-	}
+	if (buf.data == NULL)
+		logerr(EXIT, "malloc()");
 
 	active_clients = 0;
 	requests_cli = 0;
@@ -381,10 +370,8 @@ mainloop(void)
 				c->buf.len = n;
 
 				buf.data = malloc(buf.len);
-				if (buf.data == NULL) {
-					logerr(1, "malloc()");
-					exit(1);
-				}
+				if (buf.data == NULL)
+					logerr(EXIT, "malloc()");
 
 				requests_cli++;
 				c->tv = tp;
@@ -397,10 +384,8 @@ mainloop(void)
 				requests_srv++;
 
 				cq = malloc(sizeof(clientq_t));
-				if (cq == NULL) {
-					logerr(1, "malloc()");
-					exit(1);
-				}
+				if (cq == NULL)
+					logerr(EXIT, "malloc()");
 				c->cq = cq;
 				cq->cli = c;
 				STAILQ_INSERT_TAIL(&cliq, cq, next);
@@ -436,11 +421,11 @@ mainloop(void)
 
 		/* Find timeouted requests */
 		while ((c = find_to_cli(tp)) != NULL) {
-			if (c->ret > max_retries) {
+			if (c->ret > attempts) {
 				free(c->buf.data);
 				c->inuse = 0;
 				active_clients--;
-				max_tries_clients++;
+				timeouted_requests++;
 				logout(2, "reached max tries: client #%03d (ret: %d); request id: %05d",
 				    c->num, c->ret, id);
 				continue;
@@ -461,10 +446,8 @@ mainloop(void)
 			requests_srv++;
 
 			cq = malloc(sizeof(clientq_t));
-			if (cq == NULL) {
-				logerr(1, "malloc()");
-				exit(1);
-			}
+			if (cq == NULL)
+				logerr(EXIT, "malloc()");
 			c->cq = cq;
 			cq->cli = c;
 			STAILQ_INSERT_TAIL(&cliq, cq, next);
@@ -543,7 +526,7 @@ find_srv_by_addr(addr_t *addr)
 	server_t *s;
 
 	STAILQ_FOREACH(s, &srvq, next)
-		if (strncmp(inet_ntoa(addr->sin.sin_addr), s->name, IP_LEN) == 0)
+		if (memcmp(&addr->sin.sin_addr, &s->addr.sin.sin_addr, (sizeof(struct in_addr))) == 0)
 			return (s);
 
 	return (NULL);
@@ -579,7 +562,7 @@ find_newcli(int id)
 		free(c->buf.data);
 		STAILQ_REMOVE(&cliq, c->cq, clientq_s, next);
 		free(c->cq);
-		requests_dup++;
+		duplicated_requests++;
 		return (c);
 	}
 
@@ -654,16 +637,16 @@ make_stat(void)
 	fprintf(fh,
 	    "Requests from clients:  %lu\n"
 	    "Requests to servers:    %lu\n"
-	    "Requests duplicated:    %lu\n"
+	    "Duplicated requests:    %lu\n"
+	    "Timeouted requests:     %lu\n"
 	    "Active clients:         %d\n"
-	    "Max active clients:     %d\n"
-	    "Max tries clients:      %d\n",
+	    "Max active clients:     %d\n",
 	    requests_cli,
 	    requests_srv,
-	    requests_dup,
+	    duplicated_requests,
+	    timeouted_requests,
 	    active_clients,
-	    max_active_clients,
-	    max_tries_clients);
+	    max_active_clients);
 
 	STAILQ_FOREACH(s, &srvq, next)
 		fprintf(fh, "%s: send %zu, recv %zu, weight: %d\n", s->name, s->send, s->recv, s->weight);
