@@ -32,8 +32,6 @@
 #define HOST	"127.0.0.2"
 #define PORT	53
 
-#define TIMEOUT		0.5	/* seconds */
-#define ATTEMPTS	8	/* max tries */
 #define NS_MAXID	(1<<16)	/* maximum query ID */
 #define NS_PACKETSZ	512	/* default UDP packet size from <arpa/nameser.h> */
 
@@ -55,8 +53,10 @@ typedef struct buf_s buf_t;
 
 struct server_s {
 	unsigned short port;
-	unsigned short conf_weight;
 	unsigned short weight;
+	struct {
+		unsigned short weight;
+	} conf;
 	int id;
 	size_t send;
 	size_t recv;
@@ -92,6 +92,7 @@ typedef struct clientq_s clientq_t;
 
 int servers;
 int attempts;
+int autoweight;
 struct timeval timeout;
 
 #endif

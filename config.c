@@ -64,8 +64,9 @@ config_init(const char *path)
 	int port;
 	int weight;
 	int options_parsed;
-	int timeout_parsed;
 	int attempts_parsed;
+	int autoweight_parsed;
+	int timeout_parsed;
 	FILE *config;
 	char buf[LINE_MAX];
 	char *str;
@@ -81,12 +82,14 @@ config_init(const char *path)
 	srv_id = 0;
 
 	options_parsed = 0;
-	timeout_parsed = 0;
 	attempts_parsed = 0;
+	autoweight_parsed = 0;
+	timeout_parsed = 0;
 
 	/* Init global variables */
-	float2timer(TIMEOUT, &timeout);
 	attempts = ATTEMPTS;
+	autoweight = AUTOWEIGHT;
+	float2timer(TIMEOUT, &timeout);
 	servers = 0;
 	STAILQ_INIT(&srvq);
 
@@ -107,7 +110,7 @@ config_init(const char *path)
 				logerr(EXIT, "malloc()");
 			/* Default values */
 			s->port = PORT;
-			s->conf_weight = 1;
+			s->conf.weight = 1;
 
 			/* check and skip blanks */
 			check_and_skip_blanks(str);
@@ -148,7 +151,7 @@ config_init(const char *path)
 				if (weight <= 0)
 					logout(EXIT, "Weight must be positive");
 				str = endp;
-				s->conf_weight = weight;
+				s->conf.weight = weight;
 			}
 
 			/* skip blanks and comments */
@@ -167,27 +170,13 @@ config_init(const char *path)
 				logout(EXIT, "Only one options line must be used");
 			options_parsed = 1;
 
-			for (i = 0; i < 2; i++) {
-				/* check and skip blanks */
-				check_and_skip_blanks(str);
-				
-				/* timeout */
-				if (strncmp(str, "timeout:", sizeof("timeout:") - 1) == 0) {
-					str += sizeof("timeout:") - 1;
-					if (timeout_parsed)
-						logout(EXIT, "Option timeout is already declared");
-					timeout_parsed = 1;
-
-					to = strtof(str, &endp);
-					if (endp == str)
-						config_err(buf, str, line);
-					if (to <= 0)
-						logout(EXIT, "Timeout must be positive");
-					str = endp;
-					float2timer(to, &timeout);
+			for (i = 0; i < 3; i++) {
+				/* skip blanks */
+				skip_blanks(str);
 
 				/* attempts */
-				} else if (strncmp(str, "attempts:", sizeof("attempts:") - 1) == 0) {
+				if (isspace(*(str - 1)) &&
+				    strncmp(str, "attempts:", sizeof("attempts:") - 1) == 0) {
 					str += sizeof("attempts:") - 1;
 					if (attempts_parsed)
 						logout(EXIT, "Option attempts is already declared");
@@ -200,9 +189,44 @@ config_init(const char *path)
 						logout(EXIT, "Number of attempts must be positive");
 					str = endp;
 				}
+
+				/* autoweight */
+				if (isspace(*(str - 1)) &&
+				    strncmp(str, "autoweight:", sizeof("autoweight:") - 1) == 0) {
+					str += sizeof("autoweight:") - 1;
+					if (autoweight_parsed)
+						logout(EXIT, "Option autoweight is already declared");
+					autoweight_parsed = 1;
+
+					if (strncmp(str, "on", sizeof("on") - 1) == 0) {
+						str += sizeof("on") - 1;
+						autoweight = 1;
+					} else if (strncmp(str, "off", sizeof("off") - 1) == 0) {
+						str += sizeof("off") - 1;
+						autoweight = 0;
+					} else
+						logout(EXIT, "Wrong statement, use on/off");
+				}
+				
+				/* timeout */
+				if (isspace(*(str - 1)) &&
+				    strncmp(str, "timeout:", sizeof("timeout:") - 1) == 0) {
+					str += sizeof("timeout:") - 1;
+					if (timeout_parsed)
+						logout(EXIT, "Option timeout is already declared");
+					timeout_parsed = 1;
+
+					to = strtof(str, &endp);
+					if (endp == str)
+						config_err(buf, str, line);
+					if (to <= 0)
+						logout(EXIT, "Timeout must be positive");
+					str = endp;
+					float2timer(to, &timeout);
+				}
 			}
 
-			if (timeout_parsed == 0 && attempts_parsed == 0)
+			if (attempts_parsed == 0 && autoweight_parsed == 0 && timeout_parsed == 0)
 				logout(EXIT, "You must declare at least one option");
 
 			/* skip blanks and comments */

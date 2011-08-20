@@ -26,20 +26,16 @@
 #include <sys/types.h>
 #include <sys/event.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/time.h>
-#include <sys/uio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <syslog.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -47,7 +43,7 @@
 #include "log.h"
 
 static char *stat_file;
-static int srvsock;
+static int servsock;
 static int clisock;
 static int active_clients;
 static int max_active_clients;
@@ -58,11 +54,13 @@ static unsigned long requests_srv;
 static unsigned long duplicated_requests;
 static unsigned long timeouted_requests;
 static unsigned int weight;
-static server_t **srvs;
+static unsigned int dweight;
+static server_t **srvhash;
 static volatile sig_atomic_t sig_flag;
 
 static void usage(void);
 static void srv_init(void);
+static void srv_rehash(void);
 static void cli_init(void);
 static void sock_init(void);
 static void sig_init(void);
@@ -96,8 +94,6 @@ main(int argc, char **argv)
 	daemonize_flag = 1;
 	config = "forwarder.conf";
 	stat_file = NULL;
-
-	/* XXX */
 	ns_ids = NS_MAXID;
 
 	while ((ch = getopt(argc, argv, "c:d:l:ns:")) != -1) {
@@ -161,7 +157,6 @@ usage(void)
 static void
 srv_init(void)
 {
-	int i, n;
 	server_t *s;
 
 	/* Init sockaddr structures */
@@ -174,20 +169,30 @@ srv_init(void)
 			logerr(EXIT, "inet_aton()");
 	}
 
+	dweight = 0;
 	weight = 0;
 	STAILQ_FOREACH(s, &srvq, next) {
-		weight += s->conf_weight;
-		s->weight = s->conf_weight;
+		weight += s->conf.weight;
+		s->weight = s->conf.weight;
 	}
 
-	srvs = malloc(sizeof(server_t *) * weight);
-	if (srvs == NULL)
+	srvhash = malloc(sizeof(server_t *) * weight);
+	if (srvhash == NULL)
 		logerr(EXIT, "malloc()");
+
+	srv_rehash();
+}
+
+static void
+srv_rehash(void)
+{
+	int i, n;
+	server_t *s;
 
 	n = 0;
 	STAILQ_FOREACH(s, &srvq, next) {
-		for (i = 0; i < s->conf_weight; i++) {
-			srvs[n] = s;
+		for (i = 0; i < s->weight; i++) {
+			srvhash[n] = s;
 			n++;
 		}
 	}
@@ -216,11 +221,11 @@ sock_init(void)
 	struct sockaddr_in servaddr;
 
 	/* Listen socket */
-	srvsock = socket(PF_INET, SOCK_DGRAM, 0);
-	if (srvsock == -1)
+	servsock = socket(PF_INET, SOCK_DGRAM, 0);
+	if (servsock == -1)
 		logerr(EXIT, "socket()");
 
-	nonblock_socket(srvsock);
+	nonblock_socket(servsock);
 
 	bzero(&servaddr, sizeof(struct sockaddr_in));
 	servaddr.sin_family = PF_INET;
@@ -228,7 +233,7 @@ sock_init(void)
 	if (inet_aton(HOST, &servaddr.sin_addr) == 0)
 		logerr(EXIT, "inet_aton()");
 
-	rc = bind(srvsock, (const struct sockaddr *)&servaddr, sizeof(struct sockaddr_in));
+	rc = bind(servsock, (const struct sockaddr *)&servaddr, sizeof(struct sockaddr_in));
 	if (rc == -1)
 		logerr(EXIT, "bind()");
 
@@ -316,7 +321,7 @@ mainloop(void)
 	requests_srv = 0;
 
 	nc = 0;
-	EV_SET(&ch[nc++], srvsock, EVFILT_READ, EV_ADD, 0, 0, NULL);
+	EV_SET(&ch[nc++], servsock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 	EV_SET(&ch[nc++], clisock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 
 	STAILQ_INIT(&cliq);
@@ -354,9 +359,9 @@ mainloop(void)
 
 		for (i = 0; i < k; i++) {
 			buf.len = NS_PACKETSZ; /* XXX */
-			if (ev[i].ident == srvsock) {
+			if (ev[i].ident == servsock) {
 				/* Read request from client */
-				n = recv_udp(srvsock, &buf, &addr, &id);
+				n = recv_udp(servsock, &buf, &addr, &id);
 				if (n <= 0)
 					continue;
 
@@ -403,13 +408,19 @@ mainloop(void)
 
 				buf.len = n;
 				c->srv = find_srv_by_addr(&addr);
-				if (c->srv != NULL)
+				if (c->srv != NULL) {
 					c->srv->recv++;
-				else
+					if (autoweight && dweight > 0) {
+						c->srv->weight++;				
+						dweight--;
+						if (dweight == 0)
+							srv_rehash();
+					}
+				} else
 					logout(1, "find_srv_by_addr() returns NULL");
 
 				/* Send answer to client */
-				send_udp(srvsock, &buf, &c->addr);
+				send_udp(servsock, &buf, &c->addr);
 				free(c->buf.data);
 				c->inuse = 0;
 				active_clients--;
@@ -431,10 +442,10 @@ mainloop(void)
 				continue;
 			}
 
-			logout(3, "client #%03d (id: %05d) timeouted", c->num, c->id);
-
-			if (c->srv->weight > 1)
+			if (autoweight && c->srv->weight > 1) {
 				c->srv->weight--;
+				dweight++;
+			}
 
 			c->tv = tp;
 			c->ret++;
@@ -477,7 +488,8 @@ recv_udp(int fd, buf_t *buf, addr_t *addr, int *id)
 
 	memcpy(&dns_id, buf->data, sizeof(short int));
 	*id = ntohs(dns_id);
-	logout(3, "read %d bytes from %s (id: %05d)", n, inet_ntoa(sin->sin_addr), *id);
+	logout(3, "read %d bytes from %s:%d (id: %05d)",
+	    n, inet_ntoa(sin->sin_addr), htons(sin->sin_port), *id);
 
 	return (n);
 }
@@ -503,7 +515,8 @@ send_udp(int fd, buf_t *buf, addr_t *addr)
 	}
 
 	memcpy(&dns_id, buf->data, sizeof(short int));
-	logout(3, "wrote %d bytes to %s (id: %05d)", n, inet_ntoa(sin->sin_addr), ntohs(dns_id));
+	logout(3, "wrote %d bytes to %s:%d (id: %05d)",
+	    n, inet_ntoa(sin->sin_addr), htons(sin->sin_port), ntohs(dns_id));
 
 	return (n);
 }
@@ -513,9 +526,9 @@ find_srv(client_t *c)
 {
 	server_t *s;
 
-	s = srvs[(requests_srv - 1) % weight];
+	s = srvhash[requests_srv % weight];
 	logout(3, "server #%02d found (id: %d, request: %d, weight: %d/%d)",
-	    s->id, c->id, requests_srv, s->conf_weight, weight);
+	    s->id, c->id, requests_srv, s->conf.weight, weight);
 
 	return (s);
 }
@@ -649,7 +662,7 @@ make_stat(void)
 	    max_active_clients);
 
 	STAILQ_FOREACH(s, &srvq, next)
-		fprintf(fh, "%s: send %zu, recv %zu, weight: %d\n", s->name, s->send, s->recv, s->weight);
+		fprintf(fh, "%s: send %zu, recv %zu, weight: %d/%d\n", s->name, s->send, s->recv, s->weight, weight);
 
 	fclose(fh);
 }
@@ -668,7 +681,7 @@ cleanup(void)
 	}
 
 	free(cli);
-	free(srvs);
+	free(srvhash);
 
 	while (!STAILQ_EMPTY(&srvq)) {
 		s = STAILQ_FIRST(&srvq);

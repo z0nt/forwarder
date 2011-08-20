@@ -183,9 +183,9 @@ log_to_file(const int print_errno, const int level, const char *fmt, va_list ap)
 	}
 
 	/* Truncate overflowed string */
-	if (avail <= 0) {
-		bufp = buf + PIPE_BUF - 2;
-		avail = 2;
+	if (avail < 1) {
+		bufp = buf + PIPE_BUF - 1;
+		avail = 1;
 	}
 
 	n = snprintf(bufp, avail, "\n");
