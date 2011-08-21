@@ -62,7 +62,7 @@ config_init(const char *path)
 	int line;
 	int srv_id;
 	int port;
-	int weight;
+	u_int weight;
 	int options_parsed;
 	int attempts_parsed;
 	int autoweight_parsed;
@@ -238,6 +238,8 @@ config_init(const char *path)
 
 	if (servers == 0)
 		logout(EXIT, "You must specify at least one server");
+
+	fclose(config);
 }
 
 static void
@@ -265,7 +267,7 @@ config_err(const char *buf, const char *str, int line)
 	    "Error parsing config at line:%d, position: %d\n"
 	    "%s"
 	    "%*s^",
-	    line, pos, buf, pos, " ");
+	    line, pos, buf, pos, pos > 0 ? " " : "");
 }
 
 static void

@@ -42,38 +42,43 @@
 #include "forwarder.h"
 #include "log.h"
 
-static char *stat_file;
 static int servsock;
 static int clisock;
+static int ns_ids;
+static client_t *clihash;
+static server_t **srvhash;
 static int active_clients;
 static int max_active_clients;
-static int ns_ids;
-static client_t *cli;
-static unsigned long requests_cli;
-static unsigned long requests_srv;
-static unsigned long duplicated_requests;
-static unsigned long timeouted_requests;
-static unsigned int weight;
-static unsigned int dweight;
-static server_t **srvhash;
+static u_long requests_cli;
+static u_long requests_srv;
+static u_long duplicated_requests;
+static u_long timeouted_requests;
+static u_int weight;
+static u_int dweight;
+static char *stat_file;
 static volatile sig_atomic_t sig_flag;
 
 static void usage(void);
 static void srv_init(void);
 static void srv_rehash(void);
-static void cli_init(void);
+static void clihash_init(void);
 static void sock_init(void);
 static void sig_init(void);
 static void sig_handler(int signum);
 static void mainloop(void);
-static ssize_t recv_udp(int fd, buf_t *buf, addr_t *addr, int *id);
-static ssize_t send_udp(int fd, buf_t *buf, addr_t *addr);
+static void buf_init(buf_t *buf);
+static client_t *cli_init(addr_t *addr, buf_t *buf, struct timeval *tv, int id);
+static void cli_update(client_t *c, struct timeval *tv);
+static void cli_del(client_t *c);
+static void req_add(client_t *c, struct timeval *tv);
+static void req_del(client_t *c);
+static ssize_t recv_udp(int sock, buf_t *buf, addr_t *addr, int *id);
+static ssize_t send_udp(int sock, buf_t *buf, addr_t *addr);
 static server_t *find_srv(client_t *c);
 static server_t *find_srv_by_addr(addr_t *addr);
 static client_t *find_cli(int id);
-static client_t *find_newcli(int id);
 static client_t *find_to_cli(struct timeval tp);
-static void get_timeout(struct timeval tp, struct timespec *to);
+static void get_timeout(struct timeval tp, struct timeval *to);
 static void make_stat(void);
 static void cleanup(void);
 
@@ -81,18 +86,19 @@ int
 main(int argc, char **argv)
 {
 	int ch;
-	char *endptr;
+	char *endp;
 	char *config;
 	char *logfile;
 	int daemonize_flag;
 
+	/* Init global variables */
 	print_time_and_level = 0;
 	logfd = STDERR_FILENO;
+	config = "forwarder.conf";
 	debug_level = 3;
-	syslog_flag = 0;
 	logfile = "forwarder.log";
 	daemonize_flag = 1;
-	config = "forwarder.conf";
+	syslog_flag = 0;
 	stat_file = NULL;
 	ns_ids = NS_MAXID;
 
@@ -102,8 +108,8 @@ main(int argc, char **argv)
 			config = optarg;
 			break;
 		case 'd':
-			debug_level = strtol(optarg, &endptr, 10);
-			if (*optarg == '\0' || *endptr != '\0') {
+			debug_level = strtol(optarg, &endp, 10);
+			if (*optarg == '\0' || *endp != '\0') {
 				logout(LERR, "Invalid debug level: %s", optarg);
 				usage();
 			}
@@ -115,7 +121,7 @@ main(int argc, char **argv)
 			break;
 		case 'l':
 			logfile = optarg;
-			if (!strcmp(logfile, "syslog"))
+			if (strncmp(logfile, "syslog", sizeof("syslog") - 1) == 0)
 				syslog_flag = 1;
 			else
 				syslog_flag = 0;
@@ -129,13 +135,13 @@ main(int argc, char **argv)
 			break;
 		default:
 			usage();
-			break;
+			/* NOTREACHED */
 		}
 	}
 
 	config_init(config);
 	srv_init();
-	cli_init();
+	clihash_init();
 	sock_init();
 	loginit(logfile);
 	if (daemonize_flag)
@@ -144,6 +150,7 @@ main(int argc, char **argv)
 	sig_init();
 	mainloop();
 
+	/* NOTREACHED */
 	exit(0);
 }
 
@@ -199,18 +206,18 @@ srv_rehash(void)
 }
 
 static void
-cli_init(void)
+clihash_init(void)
 {
 	int i;
 
-	cli = malloc(sizeof(client_t) * ns_ids);
-	if (cli == NULL)
+	clihash = malloc(sizeof(client_t) * ns_ids);
+	if (clihash == NULL)
 		logerr(EXIT, "malloc()");
 
 	for (i = 0; i < ns_ids; i++) {
-		cli[i].inuse = 0;
-		bzero(&cli[i].addr.sin, sizeof(struct sockaddr_in));
-		cli[i].addr.len = sizeof(struct sockaddr_in);
+		clihash[i].req = NULL;
+		bzero(&clihash[i].addr.sin, sizeof(struct sockaddr_in));
+		clihash[i].addr.len = sizeof(struct sockaddr_in);
 	}
 }
 
@@ -287,13 +294,12 @@ mainloop(void)
 	ssize_t n;
 	struct kevent *ch;
 	struct kevent *ev;
-	struct timespec *top;
-	struct timespec to;
-	struct timeval tp;
+	struct timeval now;
+	struct timeval to;
+	struct timespec ts;
 	buf_t buf;
 	addr_t addr;
 	client_t *c;
-	clientq_t *cq;
 
 	/* Initialization */
 	bzero(&addr.sin, sizeof(struct sockaddr_in));
@@ -311,36 +317,36 @@ mainloop(void)
 	if (kq == -1)
 		logerr(EXIT, "kqueue()");
 
-	buf.len = NS_PACKETSZ;
-	buf.data = malloc(buf.len);
-	if (buf.data == NULL)
-		logerr(EXIT, "malloc()");
+	buf_init(&buf);
 
 	active_clients = 0;
+	max_active_clients = 0;
 	requests_cli = 0;
 	requests_srv = 0;
+	duplicated_requests = 0;
+	timeouted_requests = 0;
 
 	nc = 0;
 	EV_SET(&ch[nc++], servsock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 	EV_SET(&ch[nc++], clisock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 
-	STAILQ_INIT(&cliq);
+	STAILQ_INIT(&requests);
 
 	/* Main loop */
 	for ( ;; ) {
-		if (active_clients == 0) {
-			top = NULL;
-		} else {
-			get_timeout(tp, &to);
-			top = &to;
+		if (!STAILQ_EMPTY(&requests)) {
+			get_timeout(now, &to);
+			ts.tv_sec = to.tv_sec;
+			ts.tv_nsec = to.tv_usec * 1000;
 		}
 
 		do {
-			k = kevent(kq, ch, nc, ev, 2 /* number of sockets */, top);
+			k = kevent(kq, ch, nc, ev, 2, STAILQ_EMPTY(&requests) ? NULL : &ts);
 			if (sig_flag == 1) {
 				make_stat();
 				sig_flag = 0;
 			} else if (sig_flag == 2) {
+				free(buf.data); /* isn't safe */
 				free(ev);
 				free(ch);
 				cleanup();
@@ -351,49 +357,25 @@ mainloop(void)
 			logerr(1, "kevent()");
 
 		nc = 0;
-		gettimeofday(&tp, NULL);
-		logout(3, "time: %d.%06ld", tp.tv_sec, tp.tv_usec);
+		gettimeofday(&now, NULL);
+		logout(3, "time: %d.%06ld", now.tv_sec, now.tv_usec);
 
 		if (k == 0)
 			logout(3, "kevent() timeouted");
 
 		for (i = 0; i < k; i++) {
-			buf.len = NS_PACKETSZ; /* XXX */
 			if (ev[i].ident == servsock) {
 				/* Read request from client */
 				n = recv_udp(servsock, &buf, &addr, &id);
 				if (n <= 0)
 					continue;
 
-				c = find_newcli(id);
-				if (c == NULL)
-					continue;
-
-				memcpy(&c->addr, &addr, sizeof(addr_t));
-				c->id = id;
-				c->buf.data = buf.data;
-				c->buf.len = n;
-
-				buf.data = malloc(buf.len);
-				if (buf.data == NULL)
-					logerr(EXIT, "malloc()");
-
-				requests_cli++;
-				c->tv = tp;
-				c->ret++;
-				c->srv = find_srv(c);
+				c = cli_init(&addr, &buf, &now, id);
+				buf_init(&buf);
 
 				/* Send request to DNS server */
 				send_udp(clisock, &c->buf, &c->srv->addr);
-				c->srv->send++;
-				requests_srv++;
-
-				cq = malloc(sizeof(clientq_t));
-				if (cq == NULL)
-					logerr(EXIT, "malloc()");
-				c->cq = cq;
-				cq->cli = c;
-				STAILQ_INSERT_TAIL(&cliq, cq, next);
+				req_add(c, &now);
 			} else {
 				/* Read answer from DNS server */
 				n = recv_udp(clisock, &buf, &addr, &id);
@@ -406,7 +388,6 @@ mainloop(void)
 					continue;
 				}
 
-				buf.len = n;
 				c->srv = find_srv_by_addr(&addr);
 				if (c->srv != NULL) {
 					c->srv->recv++;
@@ -421,56 +402,129 @@ mainloop(void)
 
 				/* Send answer to client */
 				send_udp(servsock, &buf, &c->addr);
-				free(c->buf.data);
-				c->inuse = 0;
-				active_clients--;
-
-				STAILQ_REMOVE(&cliq, c->cq, clientq_s, next);
-				free(c->cq);
+				cli_del(c);
 			}
 		}
 
 		/* Find timeouted requests */
-		while ((c = find_to_cli(tp)) != NULL) {
+		while ((c = find_to_cli(now)) != NULL) {
 			if (c->ret > attempts) {
-				free(c->buf.data);
-				c->inuse = 0;
-				active_clients--;
+				cli_del(c);
+
 				timeouted_requests++;
 				logout(2, "reached max tries: client #%03d (ret: %d); request id: %05d",
 				    c->num, c->ret, id);
 				continue;
 			}
 
+			req_del(c);
+
 			if (autoweight && c->srv->weight > 1) {
 				c->srv->weight--;
 				dweight++;
 			}
 
-			c->tv = tp;
-			c->ret++;
-			c->srv = find_srv(c);
+			cli_update(c, &now);
 
 			/* Send request to DNS server */
 			send_udp(clisock, &c->buf, &c->srv->addr);
-			c->srv->send++;
-			requests_srv++;
-
-			cq = malloc(sizeof(clientq_t));
-			if (cq == NULL)
-				logerr(EXIT, "malloc()");
-			c->cq = cq;
-			cq->cli = c;
-			STAILQ_INSERT_TAIL(&cliq, cq, next);
+			req_add(c, &now);
 		}
 	}
 }
 
+static void
+buf_init(buf_t *buf)
+{
+	buf->len = NS_PACKETSZ;
+	buf->data = malloc(buf->len);
+	if (buf->data == NULL)
+		logerr(EXIT, "malloc()");
+}
+
+static client_t *
+cli_init(addr_t *addr, buf_t *buf, struct timeval *tv, int id)
+{
+	client_t *c;
+
+	/* Check for duplicates */
+	c = find_cli(id);
+	if (c != NULL) {
+		free(buf->data); /* FIXME: check address and chaining if new request */
+		req_del(c);
+
+		duplicated_requests++;
+		logout(1, "duplicate id: %d", id);
+		return (c);
+	}
+
+	/* Init client */
+	c = &clihash[id];
+
+	c->id = id;
+	c->ret = 0;
+	c->addr = *addr;
+	c->buf.data = buf->data;
+	c->buf.len = buf->len;
+	c->num = requests_cli;
+
+	requests_cli++;
+	active_clients++;
+	if (active_clients > max_active_clients)
+		max_active_clients = active_clients;
+
+	cli_update(c, tv);
+
+	return (c);
+}
+
+static void
+cli_update(client_t *c, struct timeval *tv)
+{
+	timeradd(tv, &timeout, &c->tv);
+	c->ret++;
+	c->srv = find_srv(c);
+}
+
+static void
+cli_del(client_t *c)
+{
+	free(c->buf.data);
+	active_clients--;
+
+	req_del(c);
+}
+
+static void
+req_add(client_t *c, struct timeval *tv)
+{
+	request_t *req;
+
+	req = malloc(sizeof(request_t));
+	if (req == NULL)
+		logerr(EXIT, "malloc()");
+	req->cli = c;
+	STAILQ_INSERT_TAIL(&requests, req, next);
+
+	c->req = req;
+	c->srv->send++;
+
+	requests_srv++;
+}
+
+static void
+req_del(client_t *c)
+{
+	STAILQ_REMOVE(&requests, c->req, request_s, next);
+	free(c->req);
+	c->req = NULL; /* must be NULL here */
+}
+
 static ssize_t
-recv_udp(int fd, buf_t *buf, addr_t *addr, int *id)
+recv_udp(int sock, buf_t *buf, addr_t *addr, int *id)
 {
 	ssize_t n;
-	short int dns_id;
+	u_short dns_id;
 	struct sockaddr_in *sin;
 	socklen_t *len;
 
@@ -478,7 +532,7 @@ recv_udp(int fd, buf_t *buf, addr_t *addr, int *id)
 	len = &addr->len;
 
 	do {
-		n = recvfrom(fd, buf->data, buf->len, 0, (struct sockaddr *)sin, len);
+		n = recvfrom(sock, buf->data, NS_PACKETSZ, 0, (struct sockaddr *)sin, len);
 	} while (n == -1 && errno == EINTR);
 
 	if (n == -1) {
@@ -486,19 +540,22 @@ recv_udp(int fd, buf_t *buf, addr_t *addr, int *id)
 		return (n);
 	}
 
-	memcpy(&dns_id, buf->data, sizeof(short int));
-	*id = ntohs(dns_id);
-	logout(3, "read %d bytes from %s:%d (id: %05d)",
-	    n, inet_ntoa(sin->sin_addr), htons(sin->sin_port), *id);
+	if (n > 0) { /* FIXME: zero result must be also checked */
+		buf->len = n;
+		memcpy(&dns_id, buf->data, sizeof(u_short));
+		*id = ntohs(dns_id);
+		logout(3, "read %d bytes from %s:%d (id: %05d)",
+		    n, inet_ntoa(sin->sin_addr), htons(sin->sin_port), *id);
+	}
 
 	return (n);
 }
 
 static ssize_t
-send_udp(int fd, buf_t *buf, addr_t *addr)
+send_udp(int sock, buf_t *buf, addr_t *addr)
 {
 	ssize_t n;
-	short int dns_id;
+	u_short dns_id;
 	struct sockaddr_in *sin;
 	socklen_t *len;
 
@@ -506,7 +563,7 @@ send_udp(int fd, buf_t *buf, addr_t *addr)
 	len = &addr->len;
 
 	do {
-		n = sendto(fd, buf->data, buf->len, 0, (const struct sockaddr *)sin, *len);
+		n = sendto(sock, buf->data, buf->len, 0, (const struct sockaddr *)sin, *len);
 	} while (n == -1 && errno == EINTR);
 
 	if (n == -1) {
@@ -514,7 +571,7 @@ send_udp(int fd, buf_t *buf, addr_t *addr)
 		return (n);
 	}
 
-	memcpy(&dns_id, buf->data, sizeof(short int));
+	memcpy(&dns_id, buf->data, sizeof(u_short));
 	logout(3, "wrote %d bytes to %s:%d (id: %05d)",
 	    n, inet_ntoa(sin->sin_addr), htons(sin->sin_port), ntohs(dns_id));
 
@@ -553,63 +610,27 @@ find_cli(int id)
 		return (NULL);
 	}
 
-	if (cli[id].inuse == 1)
-		return (&cli[id]);
+	if (clihash[id].req)
+		return (&clihash[id]);
 
 	return (NULL);
 }
 
 static client_t *
-find_newcli(int id)
-{
-	client_t *c;
-
-	if (id < 0 || id > (ns_ids - 1)) {
-		logout(1, "Wrong request id: %d", id);
-		return (NULL);
-	}
-
-	c = find_cli(id);
-	if (c != NULL) {
-		logout(1, "duplicate id: %d", id);
-		free(c->buf.data);
-		STAILQ_REMOVE(&cliq, c->cq, clientq_s, next);
-		free(c->cq);
-		duplicated_requests++;
-		return (c);
-	}
-
-	cli[id].inuse = 1;
-	cli[id].ret = 0;
-	cli[id].num = requests_cli;
-
-	active_clients++;
-	if (active_clients > max_active_clients)
-		max_active_clients = active_clients;
-
-	return (&cli[id]);
-}
-
-static client_t *
 find_to_cli(struct timeval tp)
 {
-	clientq_t *cq;
+	request_t *req;
 	client_t *c;
-	struct timeval tv;
 
 	c = NULL;
 
-	if (!STAILQ_EMPTY(&cliq)) {
-		cq = STAILQ_FIRST(&cliq);
-		timeradd(&cq->cli->tv, &timeout, &tv);
-		if (timercmp(&tp, &tv, >))
-			c = cq->cli;
+	if (!STAILQ_EMPTY(&requests)) {
+		req = STAILQ_FIRST(&requests);
+		if (timercmp(&tp, &req->cli->tv, >))
+			c = req->cli;
 	}
 
 	if (c) {
-		STAILQ_REMOVE_HEAD(&cliq, next);
-		free(cq);
-
 		logout(3, "client #%03d (id: %05d) timeouted: %d.%06ld",
 		    c->num, c->id, c->tv.tv_sec, c->tv.tv_usec);
 	}
@@ -618,19 +639,17 @@ find_to_cli(struct timeval tp)
 }
 
 static void
-get_timeout(struct timeval tp, struct timespec *to)
+get_timeout(struct timeval tp, struct timeval *to)
 {
-	clientq_t *cq;
-	struct timeval tv;
+	request_t *req;
 	struct timeval diff;
 
-	cq = STAILQ_FIRST(&cliq);
+	req = STAILQ_FIRST(&requests);
 
-	timeradd(&cq->cli->tv, &timeout, &tv);
-	timersub(&tv, &tp, &diff);
+	timersub(&req->cli->tv, &tp, &diff);
 
 	to->tv_sec = diff.tv_sec;
-	to->tv_nsec = diff.tv_usec * 1000;
+	to->tv_usec = diff.tv_usec;
 
 	logout(3, "timeout set: %d.%06d", diff.tv_sec, diff.tv_usec);
 }
@@ -670,17 +689,17 @@ make_stat(void)
 static void
 cleanup(void)
 {
-	clientq_t *cq;
+	request_t *req;
 	server_t *s;
 
-	while (!STAILQ_EMPTY(&cliq)) {
-		cq = STAILQ_FIRST(&cliq);
-		STAILQ_REMOVE_HEAD(&cliq, next);
-		free(cq->cli->buf.data);
-		free(cq);
+	while (!STAILQ_EMPTY(&requests)) {
+		req = STAILQ_FIRST(&requests);
+		STAILQ_REMOVE_HEAD(&requests, next);
+		free(req->cli->buf.data);
+		free(req);
 	}
 
-	free(cli);
+	free(clihash);
 	free(srvhash);
 
 	while (!STAILQ_EMPTY(&srvq)) {

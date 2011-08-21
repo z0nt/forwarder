@@ -37,58 +37,53 @@
 
 #define nonblock_socket(s) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK)
 
+typedef struct addr_s addr_t;
+typedef struct buf_s buf_t;
+typedef struct server_s server_t;
+typedef struct client_s client_t;
+typedef struct request_s request_t;
+
 struct addr_s {
 	struct sockaddr_in sin;
 	socklen_t len;
 };
-
-typedef struct addr_s addr_t;
 
 struct buf_s {
 	void *data;
 	ssize_t len;
 };
 
-typedef struct buf_s buf_t;
-
 struct server_s {
-	unsigned short port;
-	unsigned short weight;
+	u_short id;
+	u_int weight;
 	struct {
-		unsigned short weight;
+		u_int weight;
 	} conf;
-	int id;
 	size_t send;
 	size_t recv;
 	addr_t addr;
+	in_port_t port;
 	char name[INET_ADDRSTRLEN];
 	STAILQ_ENTRY(server_s) next;
 };
 STAILQ_HEAD(, server_s) srvq;
 
-typedef struct server_s server_t;
-
 struct client_s {
-	int id;
-	int num;
-	int ret;
-	int inuse;
-	server_t *srv;
+	u_short id;
+	u_short ret;
+	u_long num;
 	struct timeval tv;
 	addr_t addr;
 	buf_t buf;
-	struct clientq_s *cq;
+	server_t *srv;
+	request_t *req;
 };
 
-typedef struct client_s client_t;
-
-struct clientq_s {
+struct request_s {
 	client_t *cli;
-	STAILQ_ENTRY(clientq_s) next;
+	STAILQ_ENTRY(request_s) next;
 };
-STAILQ_HEAD(, clientq_s) cliq;
-
-typedef struct clientq_s clientq_t;
+STAILQ_HEAD(, request_s) requests;
 
 int servers;
 int attempts;
