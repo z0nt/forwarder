@@ -26,13 +26,13 @@
 #ifndef _LOG_H
 #define _LOG_H
 
-#define MIN_DEBUG_LEVEL	0	/* quiet */
-#define MAX_DEBUG_LEVEL	3	/* debug */
+#define CRIT	1
+#define ERR	2
+#define WARN	3
+#define DEBUG	4
 
-#define EXIT	-1
-#define LERR	1
-#define LWARN	2
-#define LDEBUG	3
+#define MIN_DEBUG_LEVEL	(CRIT - 1)	/* quiet */
+#define MAX_DEBUG_LEVEL	DEBUG		/* debug */
 
 int print_time_and_level;
 int debug_level;

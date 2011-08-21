@@ -53,9 +53,9 @@ loginit(const char *logfile)
 	if (syslog_flag)
 		openlog(getprogname(), LOG_CONS | LOG_PID, LOG_DAEMON);
 	else {
-		fd = open(logfile, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+		fd = open(logfile, O_WRONLY | O_CREAT | O_APPEND, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
 		if (fd == -1)
-			logerr(EXIT, "Cannot open logfile: %s", logfile);
+			logerr(CRIT, "Cannot open logfile: %s", logfile);
 
 		logfd = fd;
 		print_time_and_level = 1;
@@ -74,7 +74,7 @@ logout(const int level, const char *fmt, ...)
 		log_to_file(0, level, fmt, ap);
 	va_end(ap);
 
-	if (level == EXIT)
+	if (level == CRIT)
 		exit(1);
 }
 
@@ -90,7 +90,7 @@ logerr(const int level, const char *fmt, ...)
 		log_to_file(errno, level, fmt, ap);
 	va_end(ap);
 
-	if (level == EXIT)
+	if (level == CRIT)
 		exit(1);
 }
 
@@ -116,14 +116,16 @@ log_to_syslog(const int saved_errno, const int level, const char *fmt, va_list a
 		snprintf(bufp, avail, " (%d: %%m)", saved_errno);
 
 	switch(level) {
-		case EXIT:
-		case LERR:
+		case CRIT:
+			syslog(LOG_CRIT, buf);
+			break;
+		case ERR:
 			syslog(LOG_ERR, buf);
 			break;
-		case LWARN:
+		case WARN:
 			syslog(LOG_WARNING, buf);
 			break;
-		case LDEBUG:
+		case DEBUG:
 			syslog(LOG_DEBUG, buf);
 			break;
 	}
@@ -153,14 +155,16 @@ log_to_file(const int saved_errno, const int level, const char *fmt, va_list ap)
 		lt->tm_year += 1900;
 
 		switch(level) {
-			case EXIT:
-			case LERR:
+			case CRIT:
+				nlevel = "critical";
+				break;
+			case ERR:
 				nlevel = "error";
 				break;
-			case LWARN:
+			case WARN:
 				nlevel = "warn";
 				break;
-			case LDEBUG:
+			case DEBUG:
 				nlevel = "debug";
 				break;
 		}

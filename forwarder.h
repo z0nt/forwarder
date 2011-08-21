@@ -34,6 +34,12 @@
 
 #define NS_MAXID	(1<<16)	/* maximum query ID */
 #define NS_PACKETSZ	512	/* default UDP packet size from <arpa/nameser.h> */
+#define NS_HFIXEDSZ	12	/* #/bytes of fixed data in header from <arpa/nameser.h> */
+
+#define FLAG_NONE	0
+#define FLAG_MKSTAT	1
+#define FLAG_REOPEN	2
+#define FLAG_EXIT	3
 
 #define nonblock_socket(s) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK)
 

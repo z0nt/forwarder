@@ -76,7 +76,7 @@ config_init(const char *path)
 
 	config = fopen(path, "r");
 	if (config == NULL)
-		logerr(EXIT, "Cannot open config file: %s", path);
+		logerr(CRIT, "Cannot open config file: %s", path);
 
 	line = 0;
 	srv_id = 0;
@@ -107,7 +107,7 @@ config_init(const char *path)
 			servers++;
 			s = malloc(sizeof(server_t));
 			if (s == NULL)
-				logerr(EXIT, "malloc()");
+				logerr(CRIT, "malloc()");
 			/* Default values */
 			s->port = PORT;
 			s->conf.weight = 1;
@@ -128,8 +128,8 @@ config_init(const char *path)
 				port = strtol(str, &endp, 10);
 				if (endp == str)
 					config_err(buf, str, line);
-				if (port < 1 || port > 65535)
-					logout(EXIT, "Port must be between 1..65535");
+				if (port < 1 || port > IPPORT_MAX)
+					logout(CRIT, "Port must be between 1..%d", IPPORT_MAX);
 				str = endp;
 				s->port = port;
 			}
@@ -149,7 +149,7 @@ config_init(const char *path)
 				if (endp == str)
 					config_err(buf, str, line);
 				if (weight <= 0)
-					logout(EXIT, "Weight must be positive");
+					logout(CRIT, "Weight must be positive");
 				str = endp;
 				s->conf.weight = weight;
 			}
@@ -167,7 +167,7 @@ config_init(const char *path)
 		} else if (strncmp(str, "options", sizeof("options") - 1) == 0) {
 			str += sizeof("options") - 1;
 			if (options_parsed)
-				logout(EXIT, "Only one options line must be used");
+				logout(CRIT, "Only one options line must be used");
 			options_parsed = 1;
 
 			for (i = 0; i < 3; i++) {
@@ -179,14 +179,14 @@ config_init(const char *path)
 				    strncmp(str, "attempts:", sizeof("attempts:") - 1) == 0) {
 					str += sizeof("attempts:") - 1;
 					if (attempts_parsed)
-						logout(EXIT, "Option attempts is already declared");
+						logout(CRIT, "Option attempts is already declared");
 					attempts_parsed = 1;
 
 					attempts = strtol(str, &endp, 10);
 					if (endp == str)
 						config_err(buf, str, line);
 					if (attempts <= 0)
-						logout(EXIT, "Number of attempts must be positive");
+						logout(CRIT, "Number of attempts must be positive");
 					str = endp;
 				}
 
@@ -195,7 +195,7 @@ config_init(const char *path)
 				    strncmp(str, "autoweight:", sizeof("autoweight:") - 1) == 0) {
 					str += sizeof("autoweight:") - 1;
 					if (autoweight_parsed)
-						logout(EXIT, "Option autoweight is already declared");
+						logout(CRIT, "Option autoweight is already declared");
 					autoweight_parsed = 1;
 
 					if (strncmp(str, "on", sizeof("on") - 1) == 0) {
@@ -205,7 +205,7 @@ config_init(const char *path)
 						str += sizeof("off") - 1;
 						autoweight = 0;
 					} else
-						logout(EXIT, "Wrong statement, use on/off");
+						logout(CRIT, "Wrong statement, use on/off");
 				}
 				
 				/* timeout */
@@ -213,21 +213,21 @@ config_init(const char *path)
 				    strncmp(str, "timeout:", sizeof("timeout:") - 1) == 0) {
 					str += sizeof("timeout:") - 1;
 					if (timeout_parsed)
-						logout(EXIT, "Option timeout is already declared");
+						logout(CRIT, "Option timeout is already declared");
 					timeout_parsed = 1;
 
 					to = strtof(str, &endp);
 					if (endp == str)
 						config_err(buf, str, line);
 					if (to <= 0)
-						logout(EXIT, "Timeout must be positive");
+						logout(CRIT, "Timeout must be positive");
 					str = endp;
 					float2timer(to, &timeout);
 				}
 			}
 
 			if (attempts_parsed == 0 && autoweight_parsed == 0 && timeout_parsed == 0)
-				logout(EXIT, "You must declare at least one option");
+				logout(CRIT, "You must declare at least one option");
 
 			/* skip blanks and comments */
 			skip_blanks(str);
@@ -237,7 +237,7 @@ config_init(const char *path)
 	}
 
 	if (servers == 0)
-		logout(EXIT, "You must specify at least one server");
+		logout(CRIT, "You must specify at least one server");
 
 	fclose(config);
 }
@@ -263,7 +263,7 @@ config_err(const char *buf, const char *str, int line)
 		s++;
 	}
 
-	logout(EXIT,
+	logout(CRIT,
 	    "Error parsing config at line:%d, position: %d\n"
 	    "%s"
 	    "%*s^",
