@@ -28,9 +28,11 @@
 
 #include <sys/queue.h>
 
-/*#define HOST	INADDR_ANY*/
 #define HOST	"127.0.0.2"
 #define PORT	53
+
+#define FORWARDER_CONF	"forwarder.conf"
+#define FORWARDER_LOG	"forwarder.log"
 
 #define NS_MAXID	(1<<16)	/* maximum query ID */
 #define NS_PACKETSZ	512	/* default UDP packet size from <arpa/nameser.h> */

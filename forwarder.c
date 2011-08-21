@@ -95,9 +95,9 @@ main(int argc, char **argv)
 	print_time_and_level = 0;
 	logfd = STDERR_FILENO;
 
-	config = "forwarder.conf";
+	config = FORWARDER_CONF;
 	debug_level = ERR;
-	logfile = "forwarder.log";
+	logfile = FORWARDER_LOG;
 	syslog_flag = 0;
 	daemonize_flag = 1;
 	stat_file = NULL;
@@ -374,7 +374,7 @@ mainloop(void)
 
 		nc = 0;
 		gettimeofday(&now, NULL);
-		logout(DEBUG, "time: %d.%06ld", now.tv_sec, now.tv_usec);
+		logout(DEBUG, "Now: %d.%06ld", now.tv_sec, now.tv_usec);
 
 		for (i = 0; i < k; i++) {
 			if (ev[i].ident == servsock) {
@@ -391,7 +391,7 @@ mainloop(void)
 			} else {
 				/* Read answer from DNS server */
 				n = recv_udp(clisock, &buf, &addr, &id);
-				if (n <= 0)
+				if (n < NS_HFIXEDSZ)
 					continue;
 
 				c = find_cli(id);
@@ -421,7 +421,7 @@ mainloop(void)
 		/* Find timeouted requests */
 		while ((c = find_to_cli(now)) != NULL) {
 			if (c->ret > attempts) {
-				logout(WARN, "reached max tries: client #%03d (ret: %d); request id: %05d",
+				logout(WARN, "Client #%03d reached max tries: %d (id: %05d)",
 				    c->num, c->ret, id);
 				timeouted_requests++;
 
@@ -660,8 +660,8 @@ find_to_cli(struct timeval tp)
 	}
 
 	if (c) {
-		logout(DEBUG, "Client #%03d (id: %05d) timeouted: %d.%06ld",
-		    c->num, c->id, c->tv.tv_sec, c->tv.tv_usec);
+		logout(DEBUG, "Client #%03d timeouted: %d.%06ld (id: %05d)",
+		    c->num, c->tv.tv_sec, c->tv.tv_usec, c->id);
 	}
 
 	return (c);

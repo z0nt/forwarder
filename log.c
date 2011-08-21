@@ -156,7 +156,7 @@ log_to_file(const int saved_errno, const int level, const char *fmt, va_list ap)
 
 		switch(level) {
 			case CRIT:
-				nlevel = "critical";
+				nlevel = "crit";
 				break;
 			case ERR:
 				nlevel = "error";

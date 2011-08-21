@@ -35,9 +35,9 @@
 #define MAX_DEBUG_LEVEL	DEBUG		/* debug */
 
 int print_time_and_level;
+int logfd;
 int debug_level;
 int syslog_flag;
-int logfd;
 
 void loginit(const char *logfile);
 void logout(const int level, const char *fmt, ...);
