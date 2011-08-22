@@ -105,9 +105,9 @@ config_init(const char *path)
 			str += sizeof("nameserver") - 1;
 
 			servers++;
-			s = malloc(sizeof(server_t));
+			s = calloc(1, sizeof(server_t));
 			if (s == NULL)
-				logerr(CRIT, "malloc()");
+				logerr(CRIT, "calloc()");
 			/* Default values */
 			s->port = PORT;
 			s->conf.weight = 1;

@@ -32,6 +32,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +57,7 @@ static u_int weight;
 static u_int dweight;
 static char *logfile;
 static char *stat_file;
+static uid_t uid;
 static volatile sig_atomic_t sig_flag;
 
 static void usage(void);
@@ -90,6 +92,7 @@ main(int argc, char **argv)
 	char *endp;
 	char *config;
 	int daemonize_flag;
+	struct passwd *pw;
 
 	/* Init global variables */
 	print_time_and_level = 0;
@@ -101,8 +104,9 @@ main(int argc, char **argv)
 	syslog_flag = 0;
 	daemonize_flag = 1;
 	stat_file = NULL;
+	uid = 0;
 
-	while ((ch = getopt(argc, argv, "c:d:hl:ns:")) != -1) {
+	while ((ch = getopt(argc, argv, "c:d:hl:ns:u:")) != -1) {
 		switch (ch) {
 		case 'c':
 			config = optarg;
@@ -131,12 +135,22 @@ main(int argc, char **argv)
 		case 's':
 			stat_file = optarg;
 			break;
+		case 'u':
+			pw = getpwnam(optarg);
+			if (pw == NULL)
+				logout(CRIT, "Unknown user: %s", optarg);
+			uid = pw->pw_uid;
+			break;
 		case 'h':
 		default:
 			usage();
 			/* NOTREACHED */
 		}
 	}
+
+	argc -= optind;
+	if (argc != 0)
+		usage();
 
 	config_init(config);
 	srv_init();
@@ -157,8 +171,10 @@ main(int argc, char **argv)
 static void
 usage(void)
 {
-	logout(CRIT, "Usage: %s [-c config file] [-d debug level] [-l logfile] [-n] [-s stat file]",
-	    getprogname());
+	logout(CRIT,
+	    "Usage: %s [-c config file] [-d debug level] [-l logfile] [-n]\n"
+	    "       %*s [-s stat file] [-u username]",
+	    getprogname(), strlen(getprogname()), " ");
 }
 
 static void
@@ -239,6 +255,10 @@ sock_init(void)
 	rc = bind(servsock, (const struct sockaddr *)&servaddr, sizeof(struct sockaddr_in));
 	if (rc == -1)
 		logerr(CRIT, "bind()");
+
+	if (uid)
+		if (setuid(uid) == -1)
+			logerr(CRIT, "setuid()");
 
 	/* Client socket */
 	clisock = socket(PF_INET, SOCK_DGRAM, 0);
@@ -384,6 +404,8 @@ mainloop(void)
 					continue;
 
 				c = cli_init(&addr, &buf, &now, id);
+				if (c == NULL)
+					continue;
 
 				/* Send request to DNS server */
 				send_udp(clisock, &c->buf, &c->srv->addr);
@@ -464,9 +486,14 @@ cli_init(addr_t *addr, buf_t *buf, struct timeval *tv, u_short id)
 		/* FIXME: check address and chaining if new request */
 		if (memcmp(&addr->sin.sin_addr, &c->addr.sin.sin_addr, (sizeof(struct in_addr))) == 0)
 			logout(WARN, "Duplicate id: %05d from same address", id);
-		else
+		else {
 			logout(ERR, "Duplicate id: %05d (chaining not implemented)", id);
-		
+			return (NULL);
+		}
+
+		/* Reset retry counter */
+		c->ret = 0;
+
 		req_del(c);
 		cli_update(c, tv);
 

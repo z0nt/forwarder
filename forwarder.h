@@ -31,8 +31,12 @@
 #define HOST	"127.0.0.2"
 #define PORT	53
 
-#define FORWARDER_CONF	"forwarder.conf"
-#define FORWARDER_LOG	"forwarder.log"
+#ifndef FORWARDER_CONF
+#define FORWARDER_CONF	"/etc/forwarder.conf"
+#endif
+#ifndef FORWARDER_LOG
+#define FORWARDER_LOG	"/var/log/forwarder.log"
+#endif
 
 #define NS_MAXID	(1<<16)	/* maximum query ID */
 #define NS_PACKETSZ	512	/* default UDP packet size from <arpa/nameser.h> */
