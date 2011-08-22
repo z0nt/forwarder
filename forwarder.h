@@ -93,9 +93,9 @@ struct client_s {
 
 struct request_s {
 	client_t *cli;
-	STAILQ_ENTRY(request_s) next;
+	TAILQ_ENTRY(request_s) next;
 };
-STAILQ_HEAD(, request_s) requests;
+TAILQ_HEAD(, request_s) requests;
 
 int servers;
 int attempts;

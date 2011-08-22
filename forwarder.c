@@ -354,18 +354,18 @@ mainloop(void)
 	EV_SET(&ch[nc++], servsock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 	EV_SET(&ch[nc++], clisock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 
-	STAILQ_INIT(&requests);
+	TAILQ_INIT(&requests);
 
 	/* Main loop */
 	for ( ;; ) {
-		if (!STAILQ_EMPTY(&requests)) {
+		if (!TAILQ_EMPTY(&requests)) {
 			get_timeout(now, &to);
 			ts.tv_sec = to.tv_sec;
 			ts.tv_nsec = to.tv_usec * 1000;
 		}
 
 		do {
-			k = kevent(kq, ch, nc, ev, 2, STAILQ_EMPTY(&requests) ? NULL : &ts);
+			k = kevent(kq, ch, nc, ev, 2, TAILQ_EMPTY(&requests) ? NULL : &ts);
 
 			switch (sig_flag) {
 				case FLAG_REOPEN:
@@ -559,7 +559,7 @@ req_add(client_t *c, struct timeval *tv)
 	if (req == NULL)
 		logerr(CRIT, "malloc()");
 	req->cli = c;
-	STAILQ_INSERT_TAIL(&requests, req, next);
+	TAILQ_INSERT_TAIL(&requests, req, next);
 
 	c->req = req;
 	c->srv->send++;
@@ -570,7 +570,7 @@ req_add(client_t *c, struct timeval *tv)
 static void
 req_del(client_t *c)
 {
-	STAILQ_REMOVE(&requests, c->req, request_s, next);
+	TAILQ_REMOVE(&requests, c->req, next);
 	free(c->req);
 }
 
@@ -680,8 +680,8 @@ find_to_cli(struct timeval tp)
 
 	c = NULL;
 
-	if (!STAILQ_EMPTY(&requests)) {
-		req = STAILQ_FIRST(&requests);
+	if (!TAILQ_EMPTY(&requests)) {
+		req = TAILQ_FIRST(&requests);
 		if (timercmp(&tp, &req->cli->tv, >))
 			c = req->cli;
 	}
@@ -700,7 +700,7 @@ get_timeout(struct timeval tp, struct timeval *to)
 	request_t *req;
 	struct timeval diff;
 
-	req = STAILQ_FIRST(&requests);
+	req = TAILQ_FIRST(&requests);
 
 	timersub(&req->cli->tv, &tp, &diff);
 
@@ -749,9 +749,9 @@ cleanup(void)
 	request_t *req;
 	server_t *s;
 
-	while (!STAILQ_EMPTY(&requests)) {
-		req = STAILQ_FIRST(&requests);
-		STAILQ_REMOVE_HEAD(&requests, next);
+	while (!TAILQ_EMPTY(&requests)) {
+		req = TAILQ_FIRST(&requests);
+		TAILQ_REMOVE(&requests, req, next);
 		id = req->cli->id;
 		free(req->cli->buf.data);
 		free(req);

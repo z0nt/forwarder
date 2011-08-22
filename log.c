@@ -167,6 +167,8 @@ log_to_file(const int saved_errno, const int level, const char *fmt, va_list ap)
 			case DEBUG:
 				nlevel = "debug";
 				break;
+			default:
+				nlevel = "unknown";
 		}
 
 		n = snprintf(bufp, avail, "%02d/%02d/%04d %02d:%02d:%02d.%06ld [%s] ",
