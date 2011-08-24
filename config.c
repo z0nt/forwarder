@@ -58,37 +58,27 @@ static void float2timer(float f, struct timeval *tv);
 void
 config_init(const char *path)
 {
-	int i;
 	int line;
-	int srv_id;
-	int port;
-	u_int weight;
+	int optint;
 	int options_parsed;
-	int attempts_parsed;
-	int autoweight_parsed;
 	int timeout_parsed;
+	int servers;
 	FILE *config;
 	char buf[LINE_MAX];
 	char *str;
 	char *endp;
 	server_t *s;
-	float to;
+	float optfloat;
 
 	config = fopen(path, "r");
 	if (config == NULL)
 		logerr(CRIT, "Cannot open config file: %s", path);
 
 	line = 0;
-	srv_id = 0;
-
 	options_parsed = 0;
-	attempts_parsed = 0;
-	autoweight_parsed = 0;
 	timeout_parsed = 0;
 
 	/* Init global variables */
-	attempts = ATTEMPTS;
-	autoweight = AUTOWEIGHT;
 	float2timer(TIMEOUT, &timeout);
 	servers = 0;
 	STAILQ_INIT(&srvq);
@@ -104,16 +94,16 @@ config_init(const char *path)
 		if (strncmp(str, "nameserver", sizeof("nameserver") - 1) == 0) {
 			str += sizeof("nameserver") - 1;
 
-			servers++;
+			/* check and skip blanks */
+			check_and_skip_blanks(str);
+
 			s = calloc(1, sizeof(server_t));
 			if (s == NULL)
 				logerr(CRIT, "calloc()");
+			STAILQ_INSERT_TAIL(&srvq, s, next);
+
 			/* Default values */
 			s->port = PORT;
-			s->conf.weight = 1;
-
-			/* check and skip blanks */
-			check_and_skip_blanks(str);
 
 			/* IP address */
 			strtoipv4(str, &endp, s->name);
@@ -125,43 +115,55 @@ config_init(const char *path)
 			if (*str == ':') {
 				str++;
 
-				port = strtol(str, &endp, 10);
+				optint = strtol(str, &endp, 10);
 				if (endp == str)
 					config_err(buf, str, line);
-				if (port < 1 || port > IPPORT_MAX)
+				if (optint < 1 || optint > IPPORT_MAX)
 					logout(CRIT, "Port must be between 1..%d", IPPORT_MAX);
 				str = endp;
-				s->port = port;
+				s->port = optint;
 			}
 
 			/* check and skip blanks and comments */
 			check_and_skip_blanks(str);
 			skip_comments(str);
 
-			/* weight */
-			if (strncmp(str, "weight", sizeof("weight") - 1) == 0) {
-				str += sizeof("weight") - 1;
+			/* threshold */
+			if (strncmp(str, "threshold", sizeof("threshold") - 1) == 0) {
+				str += sizeof("threshold") - 1;
 
 				/* check and skip blanks */
 				check_and_skip_blanks(str);
 
-				weight = strtol(str, &endp, 10);
+				optint = strtol(str, &endp, 10);
 				if (endp == str)
 					config_err(buf, str, line);
-				if (weight <= 0)
-					logout(CRIT, "Weight must be positive");
+				if (optint <= 0)
+					logout(CRIT, "Threshold must be positive");
 				str = endp;
-				s->conf.weight = weight;
-			}
+				s->conf.threshold = optint;
+
+				if (*str == ':') {
+					str++;
+
+					optint = strtol(str, &endp, 10);
+					if (endp == str)
+						config_err(buf, str, line);
+					if (optint <= 0)
+						logout(CRIT, "Second parameter of threshold must be positive");
+					str = endp;
+					s->conf.skip = optint;
+				} else
+					config_err(buf, str, line);
+			} else
+				logout(CRIT, "Threshold must be specified");
 
 			/* skip blanks and comments */
 			skip_blanks(str);
 			check_and_skip_comments(str);
 
-			s->id = srv_id;
-			STAILQ_INSERT_TAIL(&srvq, s, next);
-
-			srv_id++;
+			s->id = servers;
+			servers++;
 
 		/* options */
 		} else if (strncmp(str, "options", sizeof("options") - 1) == 0) {
@@ -170,64 +172,21 @@ config_init(const char *path)
 				logout(CRIT, "Only one options line must be used");
 			options_parsed = 1;
 
-			for (i = 0; i < 3; i++) {
-				/* skip blanks */
-				skip_blanks(str);
+			/* check and skip blanks */
+			check_and_skip_blanks(str);
 
-				/* attempts */
-				if (isspace(*(str - 1)) &&
-				    strncmp(str, "attempts:", sizeof("attempts:") - 1) == 0) {
-					str += sizeof("attempts:") - 1;
-					if (attempts_parsed)
-						logout(CRIT, "Option attempts is already declared");
-					attempts_parsed = 1;
+			/* timeout */
+			if (strncmp(str, "timeout:", sizeof("timeout:") - 1) == 0) {
+				str += sizeof("timeout:") - 1;
 
-					attempts = strtol(str, &endp, 10);
-					if (endp == str)
-						config_err(buf, str, line);
-					if (attempts <= 0)
-						logout(CRIT, "Number of attempts must be positive");
-					str = endp;
-				}
-
-				/* autoweight */
-				if (isspace(*(str - 1)) &&
-				    strncmp(str, "autoweight:", sizeof("autoweight:") - 1) == 0) {
-					str += sizeof("autoweight:") - 1;
-					if (autoweight_parsed)
-						logout(CRIT, "Option autoweight is already declared");
-					autoweight_parsed = 1;
-
-					if (strncmp(str, "on", sizeof("on") - 1) == 0) {
-						str += sizeof("on") - 1;
-						autoweight = 1;
-					} else if (strncmp(str, "off", sizeof("off") - 1) == 0) {
-						str += sizeof("off") - 1;
-						autoweight = 0;
-					} else
-						logout(CRIT, "Wrong statement, use on/off");
-				}
-				
-				/* timeout */
-				if (isspace(*(str - 1)) &&
-				    strncmp(str, "timeout:", sizeof("timeout:") - 1) == 0) {
-					str += sizeof("timeout:") - 1;
-					if (timeout_parsed)
-						logout(CRIT, "Option timeout is already declared");
-					timeout_parsed = 1;
-
-					to = strtof(str, &endp);
-					if (endp == str)
-						config_err(buf, str, line);
-					if (to <= 0)
-						logout(CRIT, "Timeout must be positive");
-					str = endp;
-					float2timer(to, &timeout);
-				}
+				optfloat = strtof(str, &endp);
+				if (endp == str)
+					config_err(buf, str, line);
+				if (optfloat <= 0)
+					logout(CRIT, "Timeout must be positive");
+				str = endp;
+				float2timer(optfloat, &timeout);
 			}
-
-			if (attempts_parsed == 0 && autoweight_parsed == 0 && timeout_parsed == 0)
-				logout(CRIT, "You must declare at least one option");
 
 			/* skip blanks and comments */
 			skip_blanks(str);

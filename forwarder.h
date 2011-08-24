@@ -66,13 +66,15 @@ struct buf_s {
 };
 
 struct server_s {
-	u_short id;
-	u_int weight;
+	int id;
 	struct {
-		u_int weight;
+		int threshold;
+		int skip;
 	} conf;
-	size_t send;
-	size_t recv;
+	int threshold;
+	int skip;
+	u_long send;
+	u_long recv;
 	addr_t addr;
 	in_port_t port;
 	char name[INET_ADDRSTRLEN];
@@ -82,11 +84,10 @@ STAILQ_HEAD(, server_s) srvq;
 
 struct client_s {
 	u_short id;
-	u_short ret;
 	u_long num;
-	struct timeval tv;
 	addr_t addr;
 	buf_t buf;
+	struct timeval tv;
 	server_t *srv;
 	request_t *req;
 };
@@ -97,9 +98,6 @@ struct request_s {
 };
 TAILQ_HEAD(, request_s) requests;
 
-int servers;
-int attempts;
-int autoweight;
 struct timeval timeout;
 
 #endif
