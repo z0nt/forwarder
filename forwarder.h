@@ -28,7 +28,7 @@
 
 #include <sys/queue.h>
 
-#define HOST	"127.0.0.2"
+#define HOST	"127.0.0.1"
 #define PORT	53
 
 #ifndef FORWARDER_CONF

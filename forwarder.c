@@ -50,7 +50,7 @@ static int active_clients;
 static int max_active_clients;
 static u_long requests_cli;
 static u_long requests_srv;
-static u_long duplicated_requests;
+static u_long dropped_requests;
 static u_long timeouted_requests;
 static char *logfile;
 static char *stat_file;
@@ -309,7 +309,7 @@ mainloop(void)
 	max_active_clients = 0;
 	requests_cli = 0;
 	requests_srv = 0;
-	duplicated_requests = 0;
+	dropped_requests = 0;
 	timeouted_requests = 0;
 
 	nc = 0;
@@ -353,7 +353,7 @@ mainloop(void)
 
 		nc = 0;
 		gettimeofday(&now, NULL);
-		logout(DEBUG, "Now: %d.%ld", now.tv_sec, now.tv_usec);
+		logout(DEBUG, "Now is %d.%ld", now.tv_sec, now.tv_usec);
 
 		for (i = 0; i < k; i++) {
 			if (ev[i].ident == servsock) {
@@ -365,6 +365,9 @@ mainloop(void)
 				c = cli_init(&addr, &buf, &now, id);
 				if (c == NULL)
 					continue;
+
+				id = htons(c->num % NS_MAXID);
+				memcpy(c->buf.data, &id, sizeof(u_short));
 
 				/* Send request to DNS server */
 				send_udp(clisock, &c->buf, &c->srv->addr);
@@ -392,6 +395,9 @@ mainloop(void)
 					c->srv->threshold = 0;
 					c->srv->skip = 0;
 				}
+	
+				id = htons(c->id);
+				memcpy(buf.data, &id, sizeof(u_short));
 
 				/* Send answer to client */
 				send_udp(servsock, &buf, &c->addr);
@@ -422,31 +428,15 @@ cli_init(addr_t *addr, buf_t *buf, struct timeval *tv, u_short id)
 {
 	client_t *c;
 
-	/* Check for duplicates */
-	c = find_cli(id);
-	if (c != NULL) {
-		/* FIXME: check address and chaining if new request */
-		if (memcmp(&addr->sin.sin_addr, &c->addr.sin.sin_addr, (sizeof(struct in_addr))) != 0) {
-			logout(ERR, "Duplicate id: %05d (chaining not implemented)", id);
-			return (NULL);
-		}
-
-		logout(WARN, "Duplicate id: %05d from the same address", id);
-
-		req_del(c);
-		duplicated_requests++;
-
-		if (cli_update(c, tv) == -1)
-			return (NULL);
-
-		return (c);
-	}
+	/* XXX */
+	if (clihash[requests_cli % NS_MAXID])
+		return (NULL);
 
 	/* Init client */
 	c = malloc(sizeof(client_t));
 	if (c == NULL)
 		logerr(CRIT, "malloc()");
-	clihash[id] = c;
+	clihash[requests_cli % NS_MAXID] = c;
 
 	c->id = id;
 	c->addr = *addr;
@@ -485,12 +475,9 @@ cli_update(client_t *c, struct timeval *tv)
 static void
 cli_del(client_t *c)
 {
-	u_short id;
-
-	id = c->id;
+	clihash[c->num % NS_MAXID] = NULL; /* must be NULL here */
 	free(c->buf.data);
-	free(clihash[id]);
-	clihash[id] = NULL; /* must be NULL here */
+	free(c);
 	
 	active_clients--;
 }
@@ -616,8 +603,10 @@ find_srv(client_t *c)
 	if (s) {
 		logout(DEBUG, "Found server #%02d for request #%lu (id: %05d)",
 		    s->id, requests_srv, c->id);
-	} else
+	} else {
+		dropped_requests++;
 		logout(WARN, "Client #%03d cannot find alive server (id: %05d)", c->num, c->id);
+	}
 
 	return (s);
 }
@@ -695,19 +684,19 @@ make_stat(void)
 	fprintf(fh,
 	    "Requests from clients:  %lu\n"
 	    "Requests to servers:    %lu\n"
-	    "Duplicated requests:    %lu\n"
+	    "Dropped requests:       %lu\n"
 	    "Timeouted requests:     %lu\n"
 	    "Active clients:         %d\n"
 	    "Max active clients:     %d\n",
 	    requests_cli,
 	    requests_srv,
-	    duplicated_requests,
+	    dropped_requests,
 	    timeouted_requests,
 	    active_clients,
 	    max_active_clients);
 
 	STAILQ_FOREACH(s, &srvq, next)
-		fprintf(fh, "%s:%d send: %8lu recv: %8lu\n", s->name, s->port, s->send, s->recv);
+		fprintf(fh, "%s:%d    send: %8lu recv: %8lu\n", s->name, s->port, s->send, s->recv);
 
 	fclose(fh);
 }
@@ -715,17 +704,15 @@ make_stat(void)
 static void
 cleanup(void)
 {
-	u_short id;
 	request_t *req;
 	server_t *s;
 
 	while (!TAILQ_EMPTY(&requests)) {
 		req = TAILQ_FIRST(&requests);
 		TAILQ_REMOVE(&requests, req, next);
-		id = req->cli->id;
 		free(req->cli->buf.data);
+		free(req->cli);
 		free(req);
-		free(clihash[id]);
 	}
 
 	free(clihash);
