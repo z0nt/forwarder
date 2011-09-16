@@ -39,6 +39,8 @@
 
 #include "log.h"
 
+static char logbuf[PIPE_BUF];
+
 static void log_to_syslog(const int saved_errno, const int level, const char *fmt, va_list ap);
 static void log_to_file(const int saved_errno, const int level, const char *fmt, va_list ap);
 
@@ -98,10 +100,10 @@ static void
 log_to_syslog(const int saved_errno, const int level, const char *fmt, va_list ap)
 {
 	int n, avail;
-	char buf[PIPE_BUF], *bufp;
+	char *bufp;
 
 	avail = PIPE_BUF;
-	bufp = buf;
+	bufp = logbuf;
 
 	if (level > debug_level)
 		return;
@@ -117,16 +119,16 @@ log_to_syslog(const int saved_errno, const int level, const char *fmt, va_list a
 
 	switch(level) {
 		case CRIT:
-			syslog(LOG_CRIT, buf);
+			syslog(LOG_CRIT, logbuf);
 			break;
 		case ERR:
-			syslog(LOG_ERR, buf);
+			syslog(LOG_ERR, logbuf);
 			break;
 		case WARN:
-			syslog(LOG_WARNING, buf);
+			syslog(LOG_WARNING, logbuf);
 			break;
 		case DEBUG:
-			syslog(LOG_DEBUG, buf);
+			syslog(LOG_DEBUG, logbuf);
 			break;
 	}
 }
@@ -136,13 +138,13 @@ log_to_file(const int saved_errno, const int level, const char *fmt, va_list ap)
 {
 	int n, avail;
 	char *nlevel;
-	char buf[PIPE_BUF], *bufp, errbuf[PIPE_BUF];
+	char *bufp;
 	struct timeval tv;
 	time_t tv_time;
 	struct tm *lt;
 
 	avail = PIPE_BUF;
-	bufp = buf;
+	bufp = logbuf;
 
 	if (level > debug_level)
 		return;
@@ -178,26 +180,25 @@ log_to_file(const int saved_errno, const int level, const char *fmt, va_list ap)
 	}
 
 	if (fmt != NULL) {
-		n = vsnprintf(bufp, avail, fmt, ap);
+		n = vsnprintf(bufp, avail > 0 ? avail : 0, fmt, ap);
 		bufp += n;
 		avail -= n;
 	}
 
 	if (saved_errno) {
-		strerror_r(saved_errno, errbuf, sizeof(errbuf));
-		n = snprintf(bufp, avail, " (%d: %s)", saved_errno, errbuf);
+		n = snprintf(bufp, avail > 0 ? avail : 0, " (%d: %s)", saved_errno, strerror(saved_errno));
 		bufp += n;
 		avail -= n;
 	}
 
 	/* Truncate overflowed string */
-	if (avail < 1) {
-		bufp = buf + sizeof(buf) - 1;
-		avail = 1;
+	if (avail < 2) {
+		bufp = logbuf + PIPE_BUF - 2;
+		avail = 2;
 	}
 
 	n = snprintf(bufp, avail, "\n");
 	avail -= n;
 
-	write(logfd, buf, sizeof(buf) - avail);
+	write(logfd, logbuf, PIPE_BUF - avail);
 }
