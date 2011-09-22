@@ -24,9 +24,9 @@
  */
 
 #include <sys/types.h>
-#include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/queue.h>
 
 #include <ctype.h>
 #include <limits.h>
@@ -62,7 +62,7 @@ config_init(const char *path)
 	int optint;
 	int options_parsed;
 	int timeout_parsed;
-	int servers;
+	int nservers;
 	FILE *config;
 	char buf[LINE_MAX];
 	char *str;
@@ -80,8 +80,8 @@ config_init(const char *path)
 
 	/* Init global variables */
 	float2timer(TIMEOUT, &timeout);
-	servers = 0;
-	STAILQ_INIT(&srvq);
+	nservers = 0;
+	STAILQ_INIT(&servers);
 
 	while ((str = fgets(buf, sizeof(buf), config)) != NULL) {
 		line++;
@@ -100,7 +100,7 @@ config_init(const char *path)
 			s = calloc(1, sizeof(server_t));
 			if (s == NULL)
 				logerr(CRIT, "calloc()");
-			STAILQ_INSERT_TAIL(&srvq, s, next);
+			STAILQ_INSERT_TAIL(&servers, s, next);
 
 			/* Default values */
 			s->port = PORT;
@@ -162,8 +162,8 @@ config_init(const char *path)
 			skip_blanks(str);
 			check_and_skip_comments(str);
 
-			s->id = servers;
-			servers++;
+			s->id = nservers;
+			nservers++;
 
 		/* options */
 		} else if (strncmp(str, "options", sizeof("options") - 1) == 0) {
@@ -195,7 +195,7 @@ config_init(const char *path)
 			config_err(buf, str, line);
 	}
 
-	if (servers == 0)
+	if (nservers == 0)
 		logout(CRIT, "You must specify at least one server");
 
 	fclose(config);

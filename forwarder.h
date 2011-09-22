@@ -26,8 +26,6 @@
 #ifndef _FORWARDER_H
 #define _FORWARDER_H
 
-#include <sys/queue.h>
-
 #define HOST	"127.0.0.1"
 #define PORT	53
 
@@ -42,6 +40,7 @@
 #define NS_PACKETSZ	512	/* default UDP packet size from <arpa/nameser.h> */
 #define NS_HFIXEDSZ	12	/* #/bytes of fixed data in header from <arpa/nameser.h> */
 
+/* Signal flags */
 #define FLAG_NONE	0
 #define FLAG_MKSTAT	1
 #define FLAG_REOPEN	2
@@ -50,53 +49,30 @@
 #define nonblock_socket(s) fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK)
 
 typedef struct addr_s addr_t;
-typedef struct buf_s buf_t;
 typedef struct server_s server_t;
-typedef struct client_s client_t;
-typedef struct request_s request_t;
 
 struct addr_s {
 	struct sockaddr_in sin;
 	socklen_t len;
 };
 
-struct buf_s {
-	void *data;
-	ssize_t len;
-};
-
 struct server_s {
-	int id;
+	int id;	/* Server ID */
 	struct {
 		int threshold;
 		int skip;
 	} conf;
-	int threshold;
-	int skip;
-	u_long send;
-	u_long recv;
+	int threshold;	/* Dynamic */
+	int skip;	/* Dynamic */
+	u_long send;	/* Statistics */
+	u_long recv;	/* Statistics */
+	int fd;		/* TCP socket */
 	addr_t addr;
 	in_port_t port;
 	char name[INET_ADDRSTRLEN];
 	STAILQ_ENTRY(server_s) next;
 };
-STAILQ_HEAD(, server_s) srvq;
-
-struct client_s {
-	u_short id;
-	u_long num;
-	addr_t addr;
-	buf_t buf;
-	struct timeval tv;
-	server_t *srv;
-	request_t *req;
-};
-
-struct request_s {
-	client_t *cli;
-	TAILQ_ENTRY(request_s) next;
-};
-TAILQ_HEAD(, request_s) requests;
+STAILQ_HEAD(, server_s) servers;
 
 struct timeval timeout;
 

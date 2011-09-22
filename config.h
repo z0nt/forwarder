@@ -27,7 +27,6 @@
 #define _CONFIG_H
 
 #define ATTEMPTS	8	/* max tries */
-#define AUTOWEIGHT	0	/* off */
 #define TIMEOUT		0.5	/* seconds */
 
 void config_init(const char *path);
